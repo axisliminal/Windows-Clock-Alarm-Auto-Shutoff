@@ -1,0 +1,8 @@
+{
+    "timeoutSeconds": 300,
+    "timerTimeoutSeconds": 60,
+    "smartIdleGating": true,
+    "notifyOnDismiss": true,
+    "checkIntervalSeconds": 2,
+    "loggingEnabled": true
+}

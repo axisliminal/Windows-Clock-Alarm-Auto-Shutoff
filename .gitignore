@@ -1,0 +1,19 @@
+# Runtime and diagnostic logs
+*.log
+alarm_history.log
+.stop_signal
+
+# Operating system artifacts
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Development, IDE & Editor artifacts
+.vs/
+.vscode/
+*.suo
+*.user
+*.tmp
+
+# Assistant and local AI session artifacts
+.gemini/

@@ -1,0 +1,675 @@
+﻿Comprehensive Security Audit & Threat Mitigation Analysis: Publishing Native Windows 11 Automation Utilities to GitHub
+Threat Landscape and STRIDE Threat Matrix
+Distributing open-source automation utilities that interact directly with low-level Windows APIs introduces a bifurcated threat landscape. The upstream supply chain, which encompasses maintainer identities, source repository controls, and automated continuous integration pipelines, is exposed to session theft, continuous delivery pipeline injection, and repository tampering. Concurrently, the downstream runtime environment on client endpoints exposes standard user-space processes to local privilege boundary ambiguities, unquoted execution paths, unmanaged memory corruption, and inter-process synchronization attacks.
+The application under analysis, "Windows Clock Alarm Auto-Shutoff," operates entirely in user space as a non-elevated process under Windows 10 and Windows 11 (NT 10.0 / Build 26100+). The architecture orchestrates native Windows Runtime (WinRT) notification listeners via Component Object Model (COM) interfaces, Windows 32-bit and 64-bit Application Programming Interfaces (Win32 APIs) via Platform Invoke (P/Invoke), and local file and mutex primitives. Operating within these parameters requires evaluating risks across both the GitHub distribution plane and the local operating system runtime.
+The following threat matrix establishes the severity, likelihood, and STRIDE classification (Spoofing, Tampering, Repudiation, Information Disclosure, Denial of Service, Elevation of Privilege) for each critical vector identified across the operational lifecycle of the utility.
+Threat Identifier
+	STRIDE Category
+	Threat Vector
+	Description
+	Likelihood
+	Impact
+	Primary Defensive Mitigation
+	THREAT-01
+	Spoofing
+	Maintainer Session & Identity Theft
+	Infostealer malware extracts active Chromium browser session cookies (user_session), or Adversary-in-the-Middle (AiTM) proxies intercept developer credentials.
+	Medium
+	Critical
+	Enforce FIDO2/WebAuthn hardware keys, passkeys, and conditional session binding; revoke SMS and email authentication fallbacks.
+	THREAT-02
+	Tampering
+	Repository History & Branch Mutation
+	Direct pushes or forced history rewrites modify canonical code on the main branch.
+	Medium
+	Critical
+	Deploy GitHub Repository Rulesets targeting default branches with linear history, signed commits, and zero-bypass configurations.
+	THREAT-03
+	Tampering
+	CI/CD Runner Expression Injection
+	Untrusted pull request context evaluates dynamically inside workflow run: steps, or third-party actions execute malicious code.
+	Medium
+	High
+	Enforce read-only GITHUB_TOKEN permissions (contents: read), pin actions to full commit SHAs, and isolate execution triggers.
+	THREAT-04
+	Repudiation
+	Release Package Alteration
+	Compromised release binaries or distribution packages lack tamper-evident proof of build origin.
+	Low
+	Critical
+	Implement automated SHA-256 manifests, GPG/Minisign detached signatures, and SLSA Level 3 build provenance attestations.
+	THREAT-05
+	Elevation of Privilege
+	HKCU Run Path Hijacking
+	Space-delimited executable paths in HKCU\...\Run resolve to untrusted root or directory binaries.
+	Medium
+	High
+	Encapsulate registry command paths in escaped double quotes and validate the filesystem permissions of parent directories.
+	THREAT-06
+	Tampering
+	Working Directory DLL Planting
+	Scripts executing in untrusted directories load malicious Dynamic-Link Libraries via standard search-order resolution.
+	Medium
+	High
+	Enforce explicit working directory normalization (cd /d "%~dp0") and resolve system executables via absolute System32 paths.
+	THREAT-07
+	Tampering / DoS
+	WinRT Toast XML Injection
+	Unsanitized notification strings inject arbitrary XML elements into replacement notifications or crash the WinRT COM parser.
+	Low
+	Medium
+	Migrate from string formatting to programmatic XML Document Object Model generation via Windows.Data.Xml.Dom.XmlDocument.
+	THREAT-08
+	Denial of Service
+	P/Invoke Memory Boundary Misalignment
+	Mismatched structure sizes, uninitialized header lengths (cbSize), or 32-bit/64-bit integer discrepancies trigger memory access violations.
+	Medium
+	High
+	Enforce platform-agnostic integer widths (IntPtr/UIntPtr for SIZE_T), initialize structural size fields explicitly, and validate P/Invoke declarations.
+	THREAT-09
+	Denial of Service
+	Named Mutex Squatting
+	Unprivileged local processes pre-create Local\AlarmAutoDismiss_PS1_SingleInstance to prevent daemon execution.
+	High
+	Medium
+	Instantiate synchronization primitives using explicit MutexSecurity discretionary access control lists (DACLs) bound to the caller's SID.
+	THREAT-10
+	Tampering
+	Configuration TOCTOU File Races
+	Non-atomic writes corrupt config.json or cause premature daemon termination via uncoordinated .stop_signal access.
+	Medium
+	Medium
+	Implement atomic file replacement (File.Replace) and open configuration files with explicit shared read locks (FileShare.Read).
+	Domain 1: GitHub Account, Repository, and Supply Chain Threat Modeling
+Maintainer Identity Defense and Credential Governance
+The threat landscape targeting open-source maintainers has evolved beyond simple credential stuffing toward sophisticated identity-layer subversion and session interception. Modern commodity infostealers, such as Lumma, RedLine, and Vidar, target developer workstations to extract DPAPI-encrypted browser master keys and exfiltrate active session cookies (user_session). Possession of these session tokens allows adversaries to bypass multi-factor authentication (MFA) prompts entirely, as GitHub's edge infrastructure treats the session as pre-authenticated.
+Concurrently, Adversary-in-the-Middle (AiTM) reverse proxy frameworks proxy legitimate authentication requests between the user and GitHub while capturing credentials and session cookies in flight. Malicious OAuth applications and GitHub Apps also pose a threat by enticing maintainers into authorizing third-party integrations that demand excessive repository permissions (repo, write:packages, workflow), establishing persistent backdoor access that survives account password resets.
+Defending against these identity-layer vectors requires hardware-bound authentication mechanisms. Accounts must deprecate time-based one-time password (TOTP) applications, SMS, and email-based delivery, adopting FIDO2/WebAuthn hardware security keys and cryptographic passkeys. FIDO2 protocols utilize public-key cryptography bound directly to the browser's origin URL (https://github.com). If an AiTM proxy attempts to intercept this exchange, the origin mismatch invalidates the authentication handshake. Hardware keys must require user presence and verification (PIN and physical touch) across both primary and offsite backup keys. Recovery phone numbers should be purged from GitHub profiles, and emergency recovery codes must be stored in encrypted, offline credential vaults.
+Credential boundaries require strict separation between legacy personal access tokens and fine-grained authentication primitives, alongside cryptographically resilient commit signing keys.
+Authentication Primitive
+	Underlying Mechanism
+	Granular Scope / Lifetime Boundary
+	Primary Threat Neutralized
+	Classic Personal Access Token
+	Shared static bearer token.
+	Account-wide; broad permissions (repo, admin:repo_hook); indefinite or annual lifetime.
+	None (Poses severe privilege escalation risks if leaked).
+	Fine-Grained PAT
+	Cryptographic bearer token bound to resource policy.
+	Repository-specific; least-privilege permissions (e.g., Contents: Read); maximum lifespan \le 60 days.
+	Lateral repository traversal; broad blast radius from token leakage.
+	RSA 4096-bit Signing Key
+	Asymmetric factoring cryptography.
+	Repository or account commit verification; large signature payload; higher signing latency.
+	Unsigned commit injection (Vulnerable to timing analysis on constrained hardware).
+	Ed25519 Signing Key
+	Edwards-curve Digital Signature Algorithm (Curve25519).
+	Cryptographically bound to local SSH agent (ed25519-sk); compact 64-byte signature; deterministic signing.
+	Commit author spoofing; side-channel key extraction; supply chain impersonation.
+	Using Ed25519 keys backed by hardware security modules ensures that Git commits cannot be forged even if an attacker acquires write access to the repository, preserving non-repudiation across the development lifecycle.
+Repository Rulesets and Governance Architecture
+Legacy branch protections operate on basic wildcard pattern matching, but GitHub Repository Rulesets provide centralized, declarative governance across repository hierarchies. Protecting the primary development branch (main) requires establishing an active ruleset that eliminates direct push privileges and enforces cryptographic validation.
+The governance ruleset targeting main must enforce the following explicit controls:
+* Restrict Deletions: Blocks branch deletion attempts by any identity.
+* Restrict Updates: Prohibits non-fast-forward pushes, blocking history rewrites via git push --force.
+* Require Linear History: Disallows merge commits, mandating rebase or squash workflows to maintain an auditable Git history.
+* Require Signed Commits: Ensures all commits pushed to the trunk carry a verified cryptographic signature.
+* Require Commit Author to Match Committer: Neutralizes author spoofing by verifying that the Git author email matches the authenticated committer identity.
+* Block Bypass Privileges: Leaves the ruleset bypass list empty. Administrators must not exempt themselves from validation rules, establishing a zero-trust model.
+Review policies must be tailored to maintainer workflows. Collaborative engineering teams require pull request reviews with at least one independent maintainer approval, stale approval dismissal on push, conversation resolution requirements, and mandatory reviews from paths designated in CODEOWNERS.
+Conversely, for a solo maintainer, requiring external pull request approvals creates friction, as GitHub prevents authors from approving their own pull requests. The correct architecture for a solo maintainer is to require a pull request before merging while setting the mandatory review threshold to zero. This constraint prevents direct, unverified pushes to main, forcing development into feature branches (feature/*, fix/*). When a pull request is opened, automated continuous integration tests, linters, and secret scans execute deterministically before the branch can be integrated, ensuring a verifiable audit trail without impeding delivery velocity.
+Preventing credential leakage requires multiple layers of defensive scanning:
+1. GitHub Secret Scanning: Monitors commit histories, pull requests, and issue discussions to detect known token patterns and cryptographic private keys.
+2. Secret Scanning Push Protection: Intercepts outbound git push operations in real time, rejecting commits that contain matching secret signatures before they enter the remote repository.
+3. Push Ruleset Path Restrictions: Push rulesets block commits containing local test environments, staging configuration overrides, private certificates, or developer profile paths (C:\Users\<username>\) before push transactions complete.
+CI/CD Pipeline and GitHub Actions Supply Chain Security
+Automating builds and releases introduces third-party execution risks. The GitHub Actions runtime relies on ephemeral runner virtual machines, but misconfigured workflows can allow untrusted code execution:
+* Run-Time Script Injection: Direct string interpolation of context expressions within workflow run: blocks (such as ${{ github.event.issue.title }} or ${{ github.event.pull_request.head.ref }}) allows command injection. If an adversary submits a pull request with shell command delimiters in the title or branch name, the runner executes the arbitrary commands. Context values must be passed via intermediate environment variables (env: TITLE: ${{ github.event.issue.title }}) rather than direct shell string evaluation.
+* Abuse of pull_request_target: The standard pull_request trigger runs workflow tasks in the context of an untrusted fork without access to repository secrets. Conversely, pull_request_target executes within the base repository's context and retains access to repository secrets and write-scoped tokens. Checking out code from the head of an untrusted fork (ref: ${{ github.event.pull_request.head.sha }}) within a pull_request_target workflow exposes the runner to malicious code execution that can exfiltrate secrets.
+* Third-Party Action Poisoning: Referencing actions via mutable Git tags (such as @v4) exposes the pipeline to upstream supply chain attacks if the vendor's release tag is moved to a malicious commit. Workflows must pin all third-party actions to immutable 40-character commit SHAs.
+Enforcing the Principle of Least Privilege requires restricting the default token scope. Workflows must declare a restrictive top-level permissions block:
+permissions:
+ contents: read
+
+Granular permissions must only be escalated within specific release jobs (such as contents: write for release creation, or id-token: write and attestations: write for cryptographic signing).
+Software build pipelines should implement the Supply-chain Levels for Software Artifacts (SLSA) framework. Using actions/attest-build-provenance cryptographically signs the build artifact's SHA-256 digest using ephemeral OIDC identity tokens issued by the Fulcio Certificate Authority, recording the resulting in-toto provenance statement in the Rekor public transparency ledger.
+Release Asset Integrity and Non-Repudiation
+Distributing release artifacts as standalone .zip packages exposes users to compromised mirrors, altered attachments, and transport-layer tampering. Relying on transport security alone does not provide non-repudiation.
+To ensure artifact integrity, the release pipeline must compute SHA-256 cryptographic hashes for all distribution archives, compiling them into a canonical SHA256SUMS manifest. This manifest must be signed out-of-band using a hardware-backed GPG or Minisign key to generate a detached cryptographic signature (SHA256SUMS.asc). End users verify the manifest signature against the maintainer's published public key before validating local file hashes.
+Furthermore, integrating native GitHub Artifact Attestations provides SLSA provenance that users can verify directly via the GitHub Command Line Interface (gh attestation verify). This confirms that the downloaded artifact was generated from the authentic repository's workflow run, protecting against post-build artifact substitution.
+The following workflow demonstrates an automated build, hashing, SLSA attestation, and publishing pipeline:
+name: Release Pipeline
+
+on:
+ push:
+   tags:
+     - 'v*'
+
+permissions:
+ contents: read
+
+jobs:
+ build-and-release:
+   runs-on: windows-latest
+   permissions:
+     contents: write
+ [span_9](start_span)[span_9](end_span)[span_11](start_span)[span_11](end_span)[span_13](start_span)[span_13](end_span)    id-token: write
+     attestations: write
+
+   steps:
+     - name: Harden Runner Environment
+       uses: step-security/harden-runner@4d991eb9b905fb180e374776c8124ae1ab3f3b4f # v2.11.0
+       with:
+         egress-policy: audit
+
+     - name: Checkout Source Code
+       uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+       with:
+         persist-credentials: false
+
+     - name: Package Automation Assets
+       shell: pwsh
+       run: |
+         $StagingDir = "staging"
+         New-Item -ItemType Directory -Path $StagingDir -Force | Out-Null
+         
+         Copy-Item -Path "src\AlarmAutoDismiss.ps1" -Destination $StagingDir
+         Copy-Item -Path "src\launch.bat" -Destination $StagingDir
+         Copy-Item -Path "LICENSE" -Destination $StagingDir
+         Copy-Item -Path "README.md" -Destination $StagingDir
+         
+         $ArchiveName = "WindowsClockAlarmAutoShutoff-${{ github.ref_name }}.zip"
+         Compress-Archive -Path "$StagingDir\*" -DestinationPath $ArchiveName -CompressionLevel Optimal
+         
+         $Digest = (Get-FileHash -Path $ArchiveName -Algorithm SHA256).Hash.ToLower()
+         "$Digest  $ArchiveName" | Out-File -FilePath "SHA256SUMS" -Encoding ascii
+
+     - name: Generate SLSA Build Attestation
+       uses: actions/attest-build-provenance@c074443f1a5fb4aee8390017239779945f5b3801 # v2.2.3
+       with:
+         subject-path: "WindowsClockAlarmAutoShutoff-${{ github.ref_name }}.zip"
+
+     - name: Publish GitHub Release
+       shell: pwsh
+       env:
+         GH_TOKEN: ${{ github.token }}
+       run: |
+         $ArchiveName = "WindowsClockAlarmAutoShutoff-${{ github.ref_name }}.zip"
+         gh release create "${{ github.ref_name }}" `
+           $ArchiveName `
+           "SHA256SUMS" `
+           --title "Release ${{ github.ref_name }}" `
+           --generate-notes `
+           --verify-tag
+
+Domain 2: Local Windows Execution, WinRT, and Win32 System-Level Threat Modeling
+PowerShell Execution Boundary and User-Space Hardening
+A fundamental misconception in Windows client administration is treating the PowerShell Execution Policy as a security boundary. Microsoft documentation clarifies that execution policies are administrative guardrails to prevent accidental script execution, not security boundaries capable of isolating malicious code. In a non-elevated user context executing:
+powershell.exe -ExecutionPolicy Bypass -File ...
+
+the execution policy check is explicitly bypassed. An unprivileged user or process can bypass this mechanism via multiple documented avenues, such as streaming script content directly through standard input (powershell.exe - < script.ps1), loading payloads via encoded command parameters (-EncodedCommand), or invoking script blocks through the dynamic language runtime ([ScriptBlock]::Create()).
+Consequently, security analysis must focus on practical user-space vulnerabilities, including unquoted service and startup paths, dynamic-link library search hijacking, and application control enforcement:
+* Unquoted Execution Strings in HKCU Run Keys: Registering autostart execution under HKCU\Software\Microsoft\Windows\CurrentVersion\Run introduces binary hijacking risks if paths are unquoted. When Windows parses an unquoted string containing spaces (e.g., C:\Program Files\Utilities\launch.bat), the underlying Win32 API (CreateProcess) evaluates space-delimited tokens in sequence:
+   * C:\Program.exe
+   * C:\Program Files\Utilities\launch.bat If standard users or legacy third-party installers leave write permissions enabled on the filesystem root (C:\), an unprivileged attacker can place C:\Program.exe. Upon system login, Windows executes the attacker's binary under the user's security context before launching the intended utility. All registry persistence values must encapsulate executable targets within escaped double quotes ("\"C:\Program Files\Utilities\launch.bat\"").
+* Batch Launcher Parsing and Directory Normalization: Batch wrappers often use the %~dp0 macro to resolve the directory of the running script. If the batch script executes powershell.exe -ExecutionPolicy Bypass -File %~dp0AlarmAutoDismiss.ps1 without quotes, paths containing spaces or shell metacharacters (e.g., &) cause command injection. In a folder named C:\Tools\Run & Execute\, the command interpreter executes C:\Tools\Run and treats & Execute\AlarmAutoDismiss.ps1 as a chained shell command. Enclosing the target argument within escaped quotes ("%~dp0AlarmAutoDismiss.ps1") neutralizes this behavior.
+* Working Directory DLL Hijacking: When powershell.exe initializes or compiles native interop assemblies via Add-Type, Windows follows standard DLL search-order resolution. If the application is launched from an untrusted working directory, such as a shared temporary folder or the user's Downloads directory, the runtime checks the current working directory before searching standard system paths unless SafeDllSearchMode is enforced. If a required dependency is missing from the system directory, Windows can load an attacker-controlled DLL from the working directory. Batch launchers must normalize the working directory (cd /d "%~dp0") to a trusted application folder before launching child interpreters.
+* Windows 11 Smart App Control (SAC) and WDAC Constraints: Windows 11 (Build 26100+) includes Smart App Control and Windows Defender Application Control (WDAC). Files downloaded from the internet receive an NTFS Alternate Data Stream identifier named Zone.Identifier (Mark-of-the-Web / MOTW). If SAC is active, unsigned PowerShell scripts with MOTW are blocked from executing or forced into PowerShell Constrained Language Mode (CLM). In CLM, access to arbitrary Win32 P/Invoke APIs, WinRT wrappers, and unmanaged memory handles is blocked by the Common Language Runtime. Users must remove the MOTW stream (Unblock-File) or obtain release archives signed with an authentic code-signing certificate to run in hardened environments.
+WinRT API and Toast Notification Attack Surface
+The utility monitors notifications via Windows.UI.Notifications.Management.UserNotificationListener to evaluate active alarms and dismiss them.
+The attack surface of this mechanism involves several operational factors:
+* Notification Isolation and Forgery: The UserNotificationListener API requires explicit user capability consent (userNotificationListener within the Windows Capability Access Manager Broker). In Windows 10 and 11, toast notifications are sandboxed by Application User Model ID (AUMID). A standard user-space application cannot forge the identity of Microsoft.WindowsAlarms_8wekyb3d8bbwe to the Windows Action Center, because the kernel and RPC runtime validate calling process credentials against its registered package identity. However, any local application executing in the user session can issue generic notifications containing arbitrary strings. If the daemon processes incoming notification text without validation, maliciously crafted text can exploit processing logic or trigger parser crashes.
+* Toast XML Schema Injection: The daemon issues silent notifications via Send-SilentMissedToast. Dynamically assembling raw XML strings creates an injection vector:
+<toast>
+ <visual>
+   <binding template="ToastGeneric">
+     <text id="1">Alarm Dismissed</text>
+     <text id="2">UNTRUSTED_MESSAGE_PAYLOAD</text>
+   </binding>
+ </visual>
+</toast>
+
+Concatenating untrusted text into this XML template allows XML Tag Injection. For example, injecting </text></binding></visual><audio silent="false"/><visual><binding template="ToastGeneric"><text>Injected</text> alters the structural semantics of the notification, overriding the silent flag, modifying visual elements, or appending malicious action buttons with deep links (protocol activation URIs) that trigger registered local URI schemes.
+Relying on [System.Security.SecurityElement]::Escape() is insufficient for Windows Runtime XML schemas. While SecurityElement.Escape replaces basic XML entities (<, >, &, ", '), it has critical limitations in WinRT contexts:
+1. Unicode Control Character Blindness: SecurityElement.Escape does not filter low-order ASCII or non-printing Unicode control characters (such as null bytes \0, backspaces \b, or bidirectional override marks). When passed to Windows.Data.Xml.Dom.XmlDocument.LoadXml(), these characters cause unhandled COM parser exceptions (0x80004005: Unspecified error or 0xC00CE508: An invalid character was found in text content), causing the daemon to crash.
+2. Structural Integrity vs. Data Decoupling: String sanitization requires developers to escape every dynamic value across all templates. If a future code modification omits escaping on a single parameter, the injection vulnerability returns.
+3. Programmatic Mitigation: The utility must avoid raw XML string concatenation and SecurityElement.Escape. Instead, it should use the native WinRT XML Document Object Model (Windows.Data.Xml.Dom.XmlDocument). Appending text nodes via CreateTextNode() ensures input is treated as immutable character data (PCDATA), neutralizing XML Entity Expansion (XEE), tag injection, and parser corruption.
+P/Invoke and Unmanaged Memory Boundary Safety
+The daemon interacts with unmanaged Win32 APIs via P/Invoke across kernel32.dll and user32.dll. In .NET Framework 4.8 / C# 5.0 environments, the CLR marshaler manages transitions between managed and unmanaged memory. Incorrect structure definitions, mismatched calling conventions, or inaccurate integer widths can cause memory corruption, stack imbalance, or access violations:
+Native Win32 API Function
+	Parameter / Struct Member
+	Native C++ SDK Type
+	Correct Managed .NET Type
+	Architecture Impact & Failure Mode
+	SetProcessInformation
+	PROCESS_POWER_THROTTLING_STATE
+	Struct (12 bytes)
+	Sequential Struct (Pack=4)
+	Struct misalignments or omitting Version = 1 cause the NT kernel to reject the call with Win32 Error 87 (ERROR_INVALID_PARAMETER).
+	SetProcessWorkingSetSize
+	dwMinimumWorkingSetSize
+	SIZE_T
+	IntPtr / UIntPtr
+	Declaring as int (32-bit) on 64-bit architectures truncates pointers, causing stack imbalance or sign-extension errors.
+	SetProcessWorkingSetSize
+	dwMaximumW[span_86](start_span)[span_86](end_span)orkingSetSize
+	SIZE_T
+	IntPtr / UIntPtr
+	Declaring as int triggers access violations when passing unmanaged memory limit flags (e.g., -1 for working set trimming).
+	GetLastInputInfo
+	cbSize
+	UINT (32-bit)
+	uint (UInt32)
+	Failure to initialize cbSize = sizeof(LASTINPUTINFO) causes user32.dll validation to fail, returning ERROR_INVALID_PARAMETER (87).
+	GetLastInputInfo
+	dwTime
+	DWORD (32-bit)
+	uint (UInt32)
+	Unchecked integer subtraction between Environment.TickCount and dwTime causes arithmetic overflow issues during 49.7-day tick rollovers.
+	Under Windows 11, process QoS throttling (EcoQoS / Efficiency Mode) is managed via SetProcessInformation using the PROCESS_POWER_THROTTLING_STATE structure. The structure contains three 32-bit unsigned integers: Version, ControlMask, and StateMask. In managed C# declarations, [StructLayout(LayoutKind.Sequential)] must be enforced, and Version must be initialized to PROCESS_POWER_THROTTLING_CURRENT_VERSION (value 1). The size passed to SetProcessInformation must be calculated dynamically via (uint)Marshal.SizeOf(typeof(PROCESS_POWER_THROTTLING_STATE)) (12 bytes).
+Memory trimming via SetProcessWorkingSetSize requires careful typing. In the Windows SDK, SIZE[span_80](start_span)[span_80](end_span)[span_82](start_span)[span_82](end_span)[span_84](start_span)[span_84](end_span)_T is an architecture-dependent unsigned type: 32 bits on x86, and 64 bits on x64. Using 32-bit integers (int or uint) in managed declarations results in mismatched calling conventions on 64-bit systems. The managed wrapper must type these values as IntPtr or UIntPtr. To trim working set memory, the runtime passes (IntPtr)(-1) for both bounds, instructing the memory manager to flush private pages to the standby list.
+Tracking idle input via GetLastInputInfo requires initializing the cbSize field in LASTINPUTINFO to (uint)Marshal.SizeOf(typeof(LASTINPUTINFO)) (8 bytes) prior to calling the API. Omitting this initialization causes user32.dll to abort the call with error code 87. Calculating idle time also requires handling 32-bit tick count rollovers by evaluating unsigned differences against Environment.TickCount.
+Inter-Process Synchronization and Concurrency Hardening
+Managing multiple background instances requires addressing synchronization boundaries in the operating system:
+Synchronization Artifact
+	Target Mechanism
+	Inherent Vulnerability
+	Failure Mode
+	Defensive Pattern
+	Local\AlarmAutoDismiss_PS1_SingleInstance
+	Named Win32 Mutex
+	Mutex Squatting
+	Unprivileged local process locks the named mutex first; the daemon exits prematurely (Denial of Service).
+	Instantiate with explicit MutexSecurity restricting DACLs to caller's SID; append hashed runtime identifiers.
+	config.json
+	File Stream I/O
+	Non-Atomic Writes
+	Set-Content truncates the file during updates; concurrent reads ingest partial or corrupt JSON payloads.
+	Enforce shared read locks (FileShare.Read); execute atomic transactional writes via File.Replace.
+	.stop_signal
+	Polling Signal File
+	TOCTOU File Race
+	A race condition between Test-Path and Remove-Item fails if another process holds an open file handle.
+	Idempotently consume signal files via explicit File.Delete within exception handling blocks.
+	The Local\ namespace scopes objects to the interactive terminal services logon session, isolating them from other logged-on users. However, it provides no isolation among distinct processes executing within the same user session. Any unprivileged application running under the same user account can pre-create Local\AlarmAutoDismiss_PS1_SingleInstance and hold an open handle. When the legitimate daemon starts, the mutex collision causes it to assume another instance is running, leading to an immediate exit and an unprivileged local Denial of Service.
+Defending against mutex squatting requires two controls:
+1. Discretionary Access Control Lists (DACLs): The daemon must instantiate the mutex using explicit MutexSecurity. The security descriptor must grant FullControl solely to the current user's Security Identifier (WindowsIdentity.GetCurrent().User), withholding Synchronize and Modify rights from untrusted tokens. If an unauthorized process pre-creates the mutex with conflicting permissions, the daemon raises an UnauthorizedAccessException, identifying the collision instead of failing silently.
+2. Hashed Mutex Identifiers: The mutex name should incorporate a cryptographic hash derived from the absolute script path and the user's Logon SID (e.g., Local\AppSync_ + SHA256(UserSID + ScriptPath).Substring(0,16)), making the identifier difficult for unprivileged external processes to anticipate.
+File handling requires equivalent concurrency protections. Updating config.json via standard PowerShell Set-Content truncates the destination file before writing new data. If the daemon reads configuration data during this write window, it encounters empty or malformed JSON, triggering runtime parse exceptions. The daemon must read configurations using explicit shared read locks (FileShare.Read) and write updates to an adjacent temporary file (config.json.tmp), committing changes via File.Replace(). This approach leverages the atomic replacement behavior of the Win32 MoveFileEx API (MOVEFILE_REPLACE_EXISTING), ensuring concurrent readers never encounter partially written data.
+Similarly, checking for shutdown signals by combining Test-Path .stop_signal with Remove-Item .stop_signal introduces a race condition if file handles remain open between calls. Signal management must use idempotent file operations wrapped in exception handling to manage locked handles gracefully.
+Defensive Configuration Checklist
+The following checklist details the exact configuration steps required across GitHub account settings, repository rulesets, push protections, and continuous delivery pipelines.
+Maintainer Identity and Access Management
+* Navigate to GitHub Settings -> Password and authentication.
+* Register two distinct FIDO2/WebAuthn hardware keys (primary key and offsite backup key).
+* Set hardware security keys as the preferred multi-factor authentication method.
+* Remove all phone numbers registered for SMS authentication and delete email recovery fallbacks.
+* Store account recovery codes in an encrypted, offline, air-gapped password vault.
+* Navigate to Settings -> Developer settings -> Personal access tokens -> Tokens (classic) and revoke all legacy tokens.
+* Select Fine-grained tokens -> Generate new token, restrict repository access to Windows-Clock-Alarm-Auto-Shutoff, select least-privilege permissions (Contents: Read-only), and set token expiration to \le 60 days.
+* Generate a hardware-backed Ed25519 signing key locally via ssh-keygen -t ed25519-sk -O resident -C "maintainer@project".
+* Upload the public signing key to GitHub Settings -> SSH and GPG keys (Key type: Signing Key).
+* Configure local Git defaults:
+   * git config --global user.signingkey ~/.ssh/id_ed25519_sk.pub
+   * git config --global gpg.format ssh
+   * git config --global commit.gpgsign true
+   * git config --global tag.gpgSign true
+* Enable Vigilant Mode under SSH and GPG keys to flag unsigned commits that impersonate the maintainer identity.
+Repository Ruleset Architecture (main Branch)
+* Navigate to Repository Settings -> Branches and delete any legacy branch protection rules targeting main to prevent configuration conflicts.
+* Navigate to Repository Settings -> Rules -> Rulesets -> New branch ruleset.
+* Configure general settings:
+   * Ruleset Name: Enforce-Trunk-Integrity.
+   * Enforcement Status: Active.
+   * Bypass List: Leave completely empty to enforce a zero-bypass policy.
+* Configure target branches:
+   * Select Add target -> Include default branch.
+* Configure branch protection rules:
+   * Check Restrict deletions.
+   * Check Restrict updates (disables force pushes).
+   * Check Require linear history.
+   * Check Require signed commits.
+   * Check Require a pull request before merging:
+      * For Solo Maintainer: Set required approvals to 0, check Dismiss stale pull request approvals when new commits are pushed, and check Require conversation resolution before merging.
+      * For Collaborative Teams: Set required approvals to \ge 1 and check Require review from Code Owners.
+   * Check Require status checks to pass before merging:
+      * Add required status checks (e.g., build-and-release, lint-powershell).
+      * Check Require branches to be up to date before merging.
+* Save changes to activate the ruleset.
+Secret Scanning and Push Protection
+* Navigate to Repository Settings -> Code security and analysis.
+* Enable Secret scanning.
+* Enable Push protection to block commits containing sensitive strings in real time.
+* Navigate to Repository Settings -> Rules -> Rulesets -> New push ruleset.
+* Configure file path restrictions:
+   * Ruleset Name: Block-Internal-Path-Leakage.
+   * Enforcement Status: Active.
+   * Under Push Protections, select Restrict file paths.
+   * Add file path patterns: **/*.tmp, **/*.key, **/local_settings.json, **/.stop_signal, **/dev_certs/**.
+* Save changes to enforce push validation.
+Workflow and Pipeline Hardening
+* Navigate to Repository Settings -> Actions -> General.
+* Under Workflow permissions, select Read repository contents and packages permissions.
+* Uncheck Allow GitHub Actions to create and approve pull requests.
+* Under Fork pull request workflows, select Require approval for all external contributors.
+* Review .github/workflows/*.yml files to ensure all third-party actions are pinned to 40-character commit SHAs.
+* Configure Dependabot (.github/dependabot.yml) to automatically monitor and update pinned action commit references.
+PowerShell and Win32 Hardening Code Patterns
+Hardened Batch Launcher and Persistence Installer
+The batch launcher (launch.bat) resolves relative paths safely, encapsulates macros in double quotes, resets the working directory to eliminate DLL search planting, and invokes the PowerShell interpreter from the system directory.
+@echo off
+:: ============================================================================
+:: Launcher: launch.bat
+:: Mitigates: Unquoted Path Parsing, Space Tokenization, DLL Search Planting
+:: ============================================================================
+
+setlocal EnableExtensions DisableDelayedExpansion
+
+:: Normalize working directory to the parent directory of the script
+cd /d "%~dp0"
+
+:: Resolve absolute path to PowerShell interpreter via System32
+set "PS_EXECUTABLE=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+
+if not exist "%PS_EXECUTABLE%" (
+   echo [ERROR] System PowerShell interpreter not found. >&2
+   exit /b 1
+)
+
+:: Validate target automation script existence
+set "AUTOMATION_SCRIPT=%~dp0AlarmAutoDismiss.ps1"
+if not exist "%AUTOMATION_SCRIPT%" (
+   echo [ERROR] Automation script payload missing: "%AUTOMATION_SCRIPT%" >&2
+   exit /b 1
+)
+
+:: Invoke script with isolated profile parameters and execution policy bypass
+"%PS_EXECUTABLE%" -NoProfile -NoLogo -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "%AUTOMATION_SCRIPT%"
+
+endlocal
+exit /b %ERRORLEVEL%
+
+The PowerShell installer module registers persistence by properly formatting the executable string in HKCU\Software\Microsoft\Windows\CurrentVersion\Run with escaped double quotes:
+# ============================================================================
+# Script: Set-HardenedPersistence.ps1
+# Mitigates: HKCU Unquoted Executable Path Binary Hijacking
+# ============================================================================
+
+[CmdletBinding()]
+param (
+   [Parameter(Mandatory = $false)]
+   [string]$TargetLauncher = (Join-Path -Path$PSScriptRoot -ChildPath "launch.bat")
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+function Set-DaemonAutostart {
+   [CmdletBinding()]
+   param (
+       [string]$FilePath
+   )
+
+   if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf)) {
+       throw "Specified launcher file does not exist: $FilePath"
+   }
+
+   # Resolve fully qualified canonical filesystem path
+   $ResolvedPath = (Resolve-Path -LiteralPath$FilePath).ProviderPath
+
+   # Encapsulate path in escaped quotes to prevent space-delimited path attacks
+   $EscapedPayload = "`"$ResolvedPath`""
+
+   $RunKeyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+   $ValueName  = "WindowsClockAlarmAutoShutoff"
+
+   try {
+       Set-ItemProperty -Path $RunKeyPath -Name $ValueName -Value$EscapedPayload -Type String -Force
+       Write-Verbose "Registered hardened autostart string: $EscapedPayload"
+   }
+   catch {
+       throw "Failed to update HKCU Run key: $_"
+   }
+}
+
+Set-DaemonAutostart -FilePath $TargetLauncher
+
+WinRT XML Document Object Model Toast Notification Dispatcher
+This function replaces raw string formatting and [System.Security.SecurityElement]::Escape() by using the native WinRT XML Document Object Model (Windows.Data.Xml.Dom.XmlDocument). Appending text via CreateTextNode() ensures that dynamic content is parsed strictly as character data:
+# ============================================================================
+# Function: Send-HardenedSilentToast
+# Mitigates: XML Injection, Entity Expansion (XEE), Control Character Parser Crashes
+# Architecture: Native WinRT XML DOM Manipulation (Windows.Data.Xml.Dom)
+# ============================================================================
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+function Send-HardenedSilentToast {
+   [CmdletBinding()]
+   param (
+       [Parameter(Mandatory = $true)]
+       [string]$Title,
+
+       [Parameter(Mandatory = $true)]
+       [string]$Message,
+
+       [Parameter(Mandatory = $false)]
+       [string]$AppId = "Microsoft.WindowsAlarms_8wekyb3d8bbwe"
+   )
+
+   try {
+       # Import required Windows Runtime metadata types
+       $null = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
+       $null = [Windows.UI.Notifications.ToastNotification, Windows.UI.Notifications, ContentType = WindowsRuntime]
+       $null = [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]
+
+       # Initialize native WinRT XML Document
+       $XmlDocument = New-Object Windows.Data.Xml.Dom.XmlDocument
+
+       # Construct structural elements
+       $ToastNode = $XmlDocument.CreateElement("toast")
+       $null = $XmlDocument.AppendChild($ToastNode)
+
+       # Enforce silent audio property
+       $AudioNode = $XmlDocument.CreateElement("audio")
+       $AudioNode.SetAttribute("silent", "true")
+       $null = $ToastNode.AppendChild($AudioNode)
+
+       $VisualNode = $XmlDocument.CreateElement("visual")
+       $null = $ToastNode.AppendChild($VisualNode)
+
+       $BindingNode = $XmlDocument.CreateElement("binding")
+       $BindingNode.SetAttribute("template", "ToastGeneric")
+       $null = $VisualNode.AppendChild($BindingNode)
+
+       # Construct Title text node safely
+       $TextNodeTitle = $XmlDocument.CreateElement("text")
+       $TextNodeTitle.SetAttribute("id", "1")
+       $TitleTextData = $XmlDocument.CreateTextNode($Title)
+       $null = $TextNodeTitle.AppendChild($TitleTextData)
+       $null = $BindingNode.AppendChild($TextNodeTitle)
+
+       # Construct Message text node safely (Untrusted Input Isolated)
+       $TextNodeMessage = $XmlDocument.CreateElement("text")
+       $TextNodeMessage.SetAttribute("id", "2")
+       $MessageTextData = $XmlDocument.CreateTextNode($Message)
+       $null = $TextNodeMessage.AppendChild($MessageTextData)
+       $null = $BindingNode.AppendChild($TextNodeMessage)
+
+       # Instantiate ToastNotification and dispatch via ToastNotifier
+       $ToastNotification = [Windows.UI.Notifications.ToastNotification]::new($XmlDocument)
+       $Notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($AppId)
+       $Notifier.Show($ToastNotification)
+
+       Write-Verbose "Dispatched hardened silent toast notification."
+   }
+   catch {
+       Write-Error "Failed to dispatch WinRT Toast Notification: $_"
+   }
+}
+
+Type-Safe P/Invoke Interop Implementation
+The following C# 5.0 interop implementation compiles within PowerShell 5.1 via Add-Type. It provides memory-safe declarations for SetProcessInformation, SetProcessWorkingSetSize, and GetLastInputInfo, ensuring proper struct packing, pointer widths, and parameter size initializations:
+using System;
+using System.Runtime.InteropServices;
+using System.ComponentModel;
+
+namespace HardenedAutomation.Native
+{
+   // ========================================================================
+   // Native Methods Wrapper: Kernel32 and User32
+   // Architecture: .NET Framework 4.8 / C# 5.0 Compatible
+   // Mitigates: Pointer Truncation, Stack Corruption, Struct Alignment Errors
+   // ========================================================================
+   public static class Win32Interop
+   {
+       #region Process Power Throttling API (SetProcessInformation)
+
+       public const int ProcessPowerThrottling = 4;
+       public const uint PROCESS_POWER_THROTTLI[span_15](start_span)[span_15](end_span)[span_17](start_span)[span_17](end_span)NG_CURRENT_VERSION = 1;
+       public const uint PROCESS_POWER_THROTTLING_EXECUTION_SPEED = 0x1;
+
+       [StructLayout(LayoutKind.Sequential, Pack = 4)]
+       public struct PROCESS_POWER_THROTTLING_STATE
+       {
+           public uint Version;
+           public uint ControlMask;
+           public uint StateMask;
+       }
+
+       [DllImport("kernel32.dll", SetLastError = true)]
+       [return: MarshalAs(UnmanagedType.Bool)]
+       private static extern bool SetProcessInformation(
+           IntPtr hProcess,
+           int processInformationClass,
+           ref PROCESS_POWER_THROTTLING_STATE processInformation,
+           uint processInformationSize
+       );
+
+       [DllImport("kernel32.dll")]
+       public static extern IntPtr GetCurrentProcess();
+
+       public static void SetEcoQoS(bool enable)
+       {
+           PROCESS_POWER_THROTTLING_STATE state = new PROCESS_POWER_THROTTLING_STATE();
+           state.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+           state.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+           state.StateMask = enable ? PROCESS_POWER_THROTTLING_EXECUTION_SPEED : 0;
+
+           uint size = (uint)Marshal.SizeOf(typeof(PROCESS_POWER_THROTTLING_STATE));
+
+           bool result = SetProcessInformation(
+               GetCurrentProcess(),
+               ProcessPowerThrottling,
+               ref state,
+               size
+           );
+
+           if (!result)
+           {
+               int errorCode = Marshal.GetLastWin32Error();
+               throw new Win32Exception(errorCode, "Failed to apply EcoQoS via SetProcessInformation.");
+           }
+       }
+
+       #endregion
+
+       #region Working Set Management API (SetProcessWorkingSetSize)
+
+       // SIZE_T maps to IntPtr to handle 32-bit and 64-bit architectures correctly
+       [DllImport("kernel32.dll", SetLastError = true)]
+       [return: MarshalAs(UnmanagedType.Bool)]
+       private static extern bool SetProcessWorkingSetSize(
+           IntPtr hProcess,
+           IntPtr dwMinimumWorkingSetSize,
+           IntPtr dwMaximumWorkingSetSize
+       );
+
+       public static void TrimWorkingSetMemory()
+       {
+           // Passing (IntPtr)(-1) flushes working set pages to the standby list
+           IntPtr flushToken = new IntPtr(-1);
+           bool result = SetProcessWorkingSetSize(GetCurrentProcess(), flushToken, flushToken);
+
+           if (!result)
+           {
+               int errorCode = Marshal.GetLastWin32Error();
+               throw new Win32Exception(errorCode, "Failed to trim working set via SetProcessWorkingSetSize.");
+           }
+       }
+
+       #endregion
+
+       #region User Idle Tracking API (GetLastInputInfo)
+
+       [StructLayout(LayoutKind.Sequential)]
+       public struct LASTINPUTINFO
+       {
+           public uint cbSize;
+           public uint dwTime;
+       }
+
+       [DllImport("user32.dll", SetLastError = true)]
+       [return: MarshalAs(UnmanagedType.Bool)]
+       private static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+
+       public static uint GetIdleTimeMillis()
+       {
+           LASTINPUTINFO info = new LASTINPUTINFO();
+           info.cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO)); // Pre-populate required size
+
+           if (!GetLastInputInfo(ref info))
+           {
+               int errorCode = Marshal.GetLastWin32Error();
+               throw new Win32Exception(errorCode, "Failed to retrieve idle time via GetLastInputInfo.");
+           }
+
+           uint currentTicks = (uint)Environment.TickCount;
+           return (currentTicks >= info.dwTime) ? (currentTicks - info.dwTime) : (uint.MaxValue - info.dwTime + currentTicks);
+       }
+
+       #endregion
+   }
+}
+
+Mutex Access Control and Atomic File Operations Module
+This module provides single-instance synchronization guards and atomic file operations. It restricts mutex access solely to the current user's Security Identifier to prevent mutex squatting, wraps configuration reads in shared streams, and commits updates atomically:
+```powershell
+============================================================================
+Module: Hardened-RuntimeSynchronization.ps1
+Mitigates: Mutex Squatting, DoS, Configuration TOCTOU File Races
+============================================================================
+Set-StrictMode -Version Latest $ErrorActionPreference = "Stop"
+class SingleInstanceManager : IDisposable { hidden [System.Threading.Mutex]$InstanceMutex hidden [bool]$IsOwned = $false
+SingleInstanceManager([string]$UniqueBaseIdentifier) { # Derive unique mutex name using current user SID and application path $CurrentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent() $UserSid = $CurrentIdentity.User.Value
+$Hasher = [System.Security.Cryptography.SHA256]::Create() $RawBytes = [System.Text.Encoding]::UTF8.GetBytes("$UserSid:$UniqueBaseIdentifier") $Hash = -join ($Hasher.ComputeHash($RawBytes) | ForEach-Object { "{0:x2}" -f $_ }) $MutexName = "Local\AppInstance_" + $Hash.Substring(0, 16)
+# Configure MutexSecurity DACL granting access solely to the current user $MutexSec = New-Object System.Security.AccessControl.MutexSecurity $AccessRule = New-Object System.Security.AccessControl.MutexAccessRule( $CurrentIdentity.User, [System.Security.AccessControl.MutexRights]::FullControl, [System.Security.AccessControl.AccessControlType]::Allow ) $MutexSec.AddAccessRule($AccessRule)
+$CreatedNew = $false try { $this.InstanceMutex = New-Object System.Threading.Mutex( $true, $MutexName, [ref]$CreatedNew, $MutexSec ) } catch [System.UnauthorizedAccessException] { throw "Security violation: Mutex exists with an incompatible DACL. Possible squatting attack." }
+if (-not $CreatedNew) { $this.Dispose() throw "An existing instance of this automation service is already running." }
+$this.IsOwned = $true Write-Verbose "Single-instance mutex secured: $MutexName" }
+[void] Dispose() { if ($this.InstanceMutex -ne $null) { if ($this.IsOwned) { try { $this.InstanceMutex.ReleaseMutex() } catch [System.ApplicationException] { # Handle scenario where thread affinity was modified } } $this.InstanceMutex.Dispose() $this.InstanceMutex = $null } } }
+class AtomicConfigManager { static [string] ReadJsonConfig([string]$FilePath) { if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf)) { throw "Target configuration file does not exist: $FilePath" }
+# Open file stream using shared read permissions to avoid blocking other processes $FileStream = New-Object System.IO.FileStream( $FilePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read )
+try { $Reader = New-Object System.IO.StreamReader($FileStream, [System.Text.Encoding]::UTF8) $Content = $Reader.ReadToEnd() return $Content } finally { $FileStream.Dispose() } }
+static [void] WriteJsonConfigAtomic([string]$FilePath, [string]$JsonData) { $ResolvedTarget = [System.IO.Path]::GetFullPath($FilePath) $Directory = [System.IO.Path]::GetDirectoryName($ResolvedTarget) $TempPath = Join-Path -Path $Directory -ChildPath ([System.IO.Path]::GetRandomFileName() + ".tmp")
+# Write content to temporary staging file $TempStream = New-Object System.IO.FileStream( $TempPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None )
+try { $Writer = New-Object System.IO.StreamWriter($TempStream, [System.Text.Encoding]::UTF8) $Writer.Write($JsonData) $Writer.Flush() } finally { $TempStream.Dispose() }
+# Atomically replace target configuration file via Win32 MoveFileEx semantics try { if (Test-Path -LiteralPath $ResolvedTarget) { [System.IO.File]::Replace($TempPath, $ResolvedTarget, $null) } else { [System.IO.File]::Move($TempPath, $ResolvedTarget) } } catch { if (Test-Path -LiteralPath $TempPath) { Remove-Item -LiteralPath $TempPath -Force -ErrorAction SilentlyContinue } throw "Atomic configuration update failed: $_" } } }
+function Test-And-Consume-StopSignal { [CmdletBinding()] param ( [string]$SignalPath )
+if (-not (Test-Path -LiteralPath $SignalPath -PathType Leaf)) { return $false }
+try { # Idempotently delete signal file, handling transient access locks [System.IO.File]::Delete($SignalPath) Write-Verbose "Consumed stop signal file." return $true } catch [System.IO.IOException] { return $true } catch { return $false } }
+---
+
+## Architectural Synthesis
+
+Securing native Windows automation tools published as open-source software requires coordinated protections across the cloud supply chain and the local endpoint:
+
+Upstream assurance relies on protecting developer identities and the build pipeline. Enforcing hardware-bound FIDO2 authentication keys, removing legacy tokens in favor of fine-grained personal access tokens, requiring Ed25519 commit signing, configuring zero-bypass repository rulesets on default trunks, and pinning continuous integration actions to immutable commit SHAs mitigates session hijacking, author spoofing, and workflow tampering. S[span_126](start_span)[span_126](end_span)[span_127](start_span)[span_127](end_span)[span_128](start_span)[span_128](end_span)upplementing published release archives with SHA-256 manifests and SLSA Level 3 build provenance attestations provides non-repudiation and tamper evidence for downstream consumers.
+
+Downstream client execution requires establishing practical user-space boundaries. Relying on PowerShell execution policies as a containment mechanism is structurally ineffective; defenses must instead eliminate unquoted startup paths in `HKCU\...\Run`, isolate batch execution contexts, normalize working directories, and sign release packages to maintain compatibility with Wi[span_67](start_span)[span_67](end_span)[span_69](start_span)[span_69](end_span)[span_71](start_span)[span_71](end_span)[span_73](start_span)[span_73](end_span)ndows 11 Smart App Control. At the application layer, constructing toast notifications through native WinRT XML DOM APIs prevents injection attacks and COM parser failures, while strict typing across P/Invoke boundaries ensures memory safety. F[span_129](start_span)[span_129](end_span)[span_130](start_span)[span_130](end_span)inally, configuring named mutexes with caller-SID access control lists and performing configuration updates via atomic file replacement neutralizes local Denial of Service and concurrency race conditions.
+
+Implementing these defensive co[span_121](start_span)[span_121](end_span)[span_123](start_span)[span_123](end_span)[span_125](start_span)[span_125](end_span)ntrols bridges the security gap between cloud-hosted open-source software and native Windows user-space execution, maintaining software supply chain integrity and local execution safety across enterprise environments.
+
+Works cited
+1. About rulesets - GitHub Enterprise Cloud Docs, https://docs.github.com/enterprise-cloud@latest/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets 2. Creating rulesets for a repository - GitHub Docs, https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository 3. Unpacking GitHub Rulesets: When Merge Queue Bypass Disappears, https://devactivity.com/posts/apps-tools/unpacking-github-rulesets-when-merge-queue-bypass-disappears/ 4. actions/attest-build-provenance - GitHub, https://github.com/actions/attest-build-provenance 5. Creating rulesets for a repository - GitHub Enterprise Cloud Docs, https://docs.github.com/enterprise-cloud@latest/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository 6. actions/attest-build-provenance - GitHub Marketplace, https://github.com/marketplace/actions/attest-build-provenance 7. Attestation · actions/attest-build-provenance - GitHub, https://github.com/actions/attest-build-provenance/attestations/30687524 8. Configure GitHub Artifact Attestations for secure cloud-native delivery, https://github.blog/security/supply-chain-security/configure-github-artifact-attestations-for-secure-cloud-native-delivery/ 9. Releases · actions/attest-build-provenance - GitHub, https://github.com/actions/attest-build-provenance/releases 10. gh attestation verify - GitHub CLI, https://cli.github.com/manual/gh_attestation_verify 11. Get a Handle on Securing Your Build Process with Artifact Attestations, https://coffeehousecoders.org/blog/artifact_attestations.html 12. ECR alternative : r/devsecops - Reddit, https://www.reddit.com/r/devsecops/comments/1qr2yqv/ecr_alternative/ 13. Windows10Tweaks/Tweaks Collection.reg at master - GitHub, https://github.com/jelbo/Windows10Tweaks/blob/master/Tweaks%20Collection.reg 14. PowerShell Task Scheduling Errors | PDF | Windows Registry - Scribd, https://www.scribd.com/document/794912243/Output 15. SetProcessInformation function (processthreadsapi.h) - Win32 apps, https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-setprocessinformation 16. Windows 軟即時處理實戰指南, https://comcomponent.com/zh-TW/blog/2026/03/09/000-windows-soft-realtime-practical-guide-natural/ 17. 通过PID为进程开启EcoQoS（效率模式）及任务管理器验证问题, https://www.volcengine.com/article/1172966 18. How to guarantee high precision timer on Windows 11, even when, https://stackoverflow.com/questions/78652731/how-to-guarantee-high-precision-timer-on-windows-11-even-when-the-app-is-fully 19. Performance – Alois Kraus - WordPress.com, https://aloiskraus.wordpress.com/category/performance/ 20. How to set MinWorkingSet and MaxWorkingSet in a 64-bit .NET, https://stackoverflow.com/questions/12203969/how-to-set-minworkingset-and-maxworkingset-in-a-64-bit-net-process 21. How do I get .NET to garbage collect aggressively? - Stack Overflow, https://stackoverflow.com/questions/2860917/how-do-i-get-net-to-garbage-collect-aggressively 22. WPF进阶:万字详解WPF如何性能优化原创 - CSDN博客, https://blog.csdn.net/weixin_45328355/article/details/160677305 23. Windows内存优化实战：从工作集到提交大小的精准治理 - 社区, https://bbs.csdn.net/weixin_30516429/article/details/100448918 24. How can I reduce memory in VB.NET Windows application?, https://stackoverflow.com/questions/3785099/how-can-i-reduce-memory-in-vb-net-windows-application 25. C# File.Replace protecting against a crash - Stack Overflow, https://stackoverflow.com/questions/34667770/c-sharp-file-replace-protecting-against-a-crash 26. Mutex.OpenExisting Method (System.Threading) | Microsoft Learn, https://learn.microsoft.com/en-us/dotnet/api/system.threading.mutex.openexisting?view=net-10.0 27. System.Threading.AccessControl 10.0.0 - NuGet, https://www.nuget.org/packages/System.Threading.AccessControl/10.0.0 28. Managing rulesets for a repository - GitHub Enterprise Cloud Docs, https://docs.github.com/enterprise-cloud@latest/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/managing-rulesets-for-a-repository 29. Managing rulesets for repositories in your organization - GitHub Docs, https://docs.github.com/enterprise-cloud@latest/organizations/managing-organization-settings/managing-rulesets-for-repositories-in-your-organization
