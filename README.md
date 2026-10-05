@@ -2,6 +2,7 @@
 
 [![Windows 11 / 10](https://img.shields.io/badge/Platform-Windows%2011%20%7C%2010-0078D4?logo=windows&logoColor=white)](https://microsoft.com/windows)
 [![Zero Dependencies](https://img.shields.io/badge/Dependencies-Zero%20External-success.svg)](https://github.com/axisliminal/Windows-Clock-Alarm-Auto-Shutoff)
+[![Smart App Control](https://img.shields.io/badge/Security-Smart%20App%20Control%20Compliant-brightgreen.svg)](SECURITY.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 > A lightweight Windows utility that automatically turns off ringing Windows Clock alarms and timers after a set duration.
@@ -45,6 +46,49 @@ Closing the Control Panel leaves zero background windows or tray icons; the back
 
 ---
 
+## Configuration (`config.json`)
+
+Settings can be changed via the Control Panel or edited directly in `config.json` (dynamically reloaded without restarting):
+
+```json
+{
+  "timeoutSeconds": 300,
+  "timerTimeoutSeconds": 60,
+  "smartIdleGating": false,
+  "idleGraceSeconds": 30,
+  "notifyOnDismiss": true,
+  "autoStart": true,
+  "checkIntervalSeconds": 2
+}
+```
+
+- `timeoutSeconds`: Duration (in seconds) before a wake-up alarm is silenced (default: `300`).
+- `timerTimeoutSeconds`: Duration (in seconds) before a countdown timer is silenced (default: `60`).
+- `smartIdleGating`: When `true`, defers shutoff while keyboard/mouse input is active (default: `false`).
+- `notifyOnDismiss`: When `true`, posts a silent Action Center reminder after auto-shutoff (default: `true`).
+- `autoStart`: Toggles login startup in Windows registry (default: `true`).
+
+---
+
+## Repository Structure
+
+```text
+├── Setup.bat          # 1-Click Installer (Standard or Portable)
+├── Uninstall.bat      # 1-Click Uninstaller
+├── AlarmSettings.bat  # Settings & Control Panel Launcher
+├── status.bat         # Live Service Status Checker & Auto-Healer
+├── test_alarm.bat     # 10-Second Test Alarm with Audio Cutoff
+├── config.json        # User Configuration File
+├── README.md          # User Guide & Documentation
+├── LICENSE            # MIT License
+├── SECURITY.md        # Security Policy & Model
+└── src/               # Background Engine Scripts
+    ├── AlarmAutoDismiss.ps1
+    └── AlarmSettings.ps1
+```
+
+---
+
 ## Utility Scripts
 
 - **`AlarmSettings.bat`**: Opens the graphical Control Panel.
@@ -59,6 +103,7 @@ Closing the Control Panel leaves zero background windows or tray icons; the back
 - **Operating System:** Windows 11 or Windows 10
 - **Privileges:** Standard user (No Administrator / UAC elevation required)
 - **Dependencies:** None (uses built-in Windows components)
+- **Security:** 100% Smart App Control (SAC) compliant
 
 ---
 
