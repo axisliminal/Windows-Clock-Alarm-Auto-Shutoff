@@ -55,18 +55,20 @@ Settings can be changed via the Control Panel or edited directly in `config.json
   "timeoutSeconds": 300,
   "timerTimeoutSeconds": 60,
   "smartIdleGating": false,
-  "idleGraceSeconds": 30,
   "notifyOnDismiss": true,
-  "autoStart": true,
-  "checkIntervalSeconds": 2
+  "checkIntervalSeconds": 2,
+  "loggingEnabled": true
 }
 ```
 
 - `timeoutSeconds`: Duration (in seconds) before a wake-up alarm is silenced (default: `300`).
 - `timerTimeoutSeconds`: Duration (in seconds) before a countdown timer is silenced (default: `60`).
-- `smartIdleGating`: When `true`, defers shutoff while keyboard/mouse input is active (default: `false`).
+- `smartIdleGating`: When `true`, defers shutoff while keyboard/mouse input is active, up to a 60-second grace ceiling (default: `false`).
 - `notifyOnDismiss`: When `true`, posts a silent Action Center reminder after auto-shutoff (default: `true`).
-- `autoStart`: Toggles login startup in Windows registry (default: `true`).
+- `checkIntervalSeconds`: Background polling frequency in seconds (default: `2`).
+- `loggingEnabled`: Enables event logging to `alarm_history.log` (default: `true`).
+
+*(Note: Auto-start on Windows login is managed via the Control Panel toggle or `Setup.bat`, storing its state directly in `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`).*
 
 ---
 
