@@ -1,3 +1,11 @@
+# Local backup archives (historical versions and raw research notes)
+_local_backups/
+backups/
+
+# Local development workspace (ongoing work, tests, build tools, maintenance scripts)
+development/
+push_to_github.bat
+
 # Runtime and diagnostic logs
 *.log
 alarm_history.log

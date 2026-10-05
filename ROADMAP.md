@@ -1,9 +1,9 @@
 # Project Execution Roadmap & Live Status
 
-**Current Status:** PRODUCTION READY & GIT-INITIALIZED (v1.6.1 HARDENED)  
-**Active Sprint:** Ready for GitHub Remote Push & Release Publishing  
+**Current Status:** PRODUCTION READY, STREAMLINED & GITHUB-SYNCHRONIZED (v1.6.1 ROOT RELEASE)  
+**Active Sprint:** Sprint 17 Complete (Ready for GitHub Remote Push)  
 **Last Updated:** 2026-10-05  
-**Live Blocker:** None (Awaiting Remote Repository Creation on GitHub.com)  
+**Live Blocker:** None (Ready to commit and push to GitHub remote)  
 
 ---
 
@@ -107,50 +107,39 @@
 
 ### [x] Sprint 15: Top-Level Version Folder Sorting & Repository Organization
 - [x] **Version Isolation Structure:** Created dedicated top-level version folders (`v1.6.1/`, `v1.6.0/`, `v1.0-csharp/`).
-- [x] **Duplicate Staging Removal:** Purged loose files in root and unversioned staging folders (`dist/AlarmAutoDismiss`), eliminating duplicate filenames across the repository.
-- [x] **Release Packaging Parity:** Packaged standalone ZIP archives within each release folder (`v1.6.1/AlarmAutoDismiss-v1.6.1.zip` and `v1.6.0/AlarmAutoDismiss-v1.6.0.zip`).
-- [x] **Archived Prototype Preservation:** Consolidated early C# prototype and legacy compiler wrappers into `v1.0-csharp/` with dedicated architectural documentation.
-- [x] **Root Directory Purification:** Root folder now dedicated strictly to master repository documentation (`README.md`, `PROJECT.md`, `ROADMAP.md`, `changelog.md`, `GEMINI.md`, and architecture research).
-- [x] **Documentation & Navigation Synchronization:** Updated `README.md` Quick Start and directory tree to route through version folders.
+- [x] **Duplicate Staging Removal:** Purged loose files in root and unversioned staging folders, eliminating duplicate filenames across the repository.
+- [x] **Release Packaging Parity:** Packaged standalone ZIP archives within each release folder.
+- [x] **Archived Prototype Preservation:** Consolidated early C# prototype into `v1.0-csharp/`.
 
 ### [x] Sprint 16: GitHub Publishing Preparation, Pre-Flight Sanitization & Security Hardening
-- [x] **Requirements Alignment & User Preferences:** Public repository visibility confirmed, MIT license selected, automated winget Git CLI installation confirmed.
-- [x] **Git Toolchain & WinGet Verification:** Installed official `Git.MinGit` (v2.56.0) via `winget`, registered in Windows Package Manager database for `winget upgrade` support, alias configured in `%LOCALAPPDATA%\Microsoft\WinGet\Links`.
-- [x] **Pre-Flight Repository Sanitization:**
-  - Created root `.gitignore` (ignoring logs, stop signals, IDE cache, OS files, `.gemini/`).
-  - Created root `LICENSE` (MIT License).
-  - Created root `SECURITY.md` (vulnerability disclosure policy & security model).
-  - Sanitized local absolute username paths across documentation and specs.
-- [x] **Deep Research Ingestion & Threat Analysis:**
-  - Ingested `Windows Automation Security Audit.txt` and synthesized 10-vector STRIDE threat matrix.
-  - Reconciled downstream runtime risks (THREAT-05 to THREAT-10) with existing v1.6.1 codebase.
-- [x] **Codebase Security Hardening (v1.6.1):**
-  - **WinRT Toast XML DOM (THREAT-07):** Migrated `Send-SilentMissedToast` to native `Windows.Data.Xml.Dom.XmlDocument` with `CreateTextNode()` calls for immunity against XML injection and Unicode parser corruption.
-  - **Named Mutex DACL (THREAT-09):** Instantiated single-instance mutex with explicit `MutexSecurity` granting `FullControl` solely to current user SID (`WindowsIdentity.GetCurrent().User`), neutralizing local mutex squatting DoS.
-  - **Type-Safe P/Invoke & Rollover Handling (THREAT-08):** Enforced `[StructLayout(LayoutKind.Sequential, Pack = 4)]` on `PROCESS_POWER_THROTTLING_STATE`, corrected `ProcessInformationSize` to `uint`, and handled the 49.7-day tick count rollover in `GetIdleTimeSeconds()`.
-  - **Atomic Configuration Writes (THREAT-10):** Updated `Save-ConfigSettings` to write to `config.json.tmp` and commit via `[System.IO.File]::Replace()`, preventing TOCTOU truncation and read races.
-  - **Execution Path Normalization & DLL Planting Mitigation (THREAT-05 & THREAT-06):** Normalized working directories (`cd /d "%~dp0"`) and resolved `powershell.exe` via explicit System32 paths across all batch files and `HKCU\...\Run` persistence commands.
-  - **Release Verification Manifest:** Automated canonical `SHA256SUMS` generation in release packager (`package_dist.ps1`).
-  - **Guardrail Verification:** Verified `AlarmSettings.ps1` file size remains strictly within budget (23,979 / 24,000 bytes).
-  - **Live Operational Verification:** Deployed hardened scripts to `%LOCALAPPDATA%\AlarmAutoDismiss`, verified active daemon, and passed 5-second synthetic test alarm audio/toast cutoff.
-- [x] **Git Author Identity Configuration & Initial Commit:**
-  - Configured Git credentials: `axisliminal <amananmahajan@gmail.com>`.
-  - Generated initial root commit `1c9afc8` on branch `main` (51 files committed, working tree clean).
+- [x] **Git Toolchain & WinGet Verification:** Installed official `Git.MinGit` (v2.56.0) via `winget`, registered in Windows Package Manager database for `winget upgrade` support.
+- [x] **Pre-Flight Repository Sanitization:** Created root `.gitignore`, `LICENSE` (MIT), and `SECURITY.md`.
+- [x] **Codebase Security Hardening (v1.6.1):** Native WinRT XML DOM toast formatting (THREAT-07), caller-SID DACL mutex security (THREAT-09), EcoQoS struct alignment & tick rollover handling (THREAT-08), atomic config commits via `File.Replace()` (THREAT-10), and normalized working directories/System32 paths (THREAT-05/06).
+- [x] **Git Author Identity Configuration & Initial Commit:** Configured `axisliminal <amananmahajan@gmail.com>` and generated commit `1c9afc8`.
+
+### [x] Sprint 17: Repository Streamlining, Dual-Track Separation & Public Release Sanitization
+- [x] **Local Backup Consolidation:** Relocated historical snapshots (`v1.0-csharp/`, `v1.6.0/`) and raw research audit files into `_local_backups/` on the local machine.
+- [x] **Git Ignore Hardening:** Hardened `.gitignore` to strictly exclude `_local_backups/`, `backups/`, `development/`, and maintenance helper `push_to_github.bat`.
+- [x] **Development Track Isolation (`development/`):** Established active development workspace with complete working copies of scripts, `dev/package_dist.ps1`, and testing assets.
+- [x] **Dual-Track Release Synchronization Skill:** Created Antigravity skill [`.agents/skills/github-sync/SKILL.md`](.agents/skills/github-sync/SKILL.md) enforcing strict development isolation and explicit user approval before promoting changes to the GitHub track.
+- [x] **Root Flattening:** Promoted hardened v1.6.1 production payload directly to repository root (`AlarmAutoDismiss.ps1`, `AlarmSettings.ps1`, `AlarmSettings.bat`, `config.json`, `Setup.bat`, `Setup.ps1`, `Uninstall.bat`, `Uninstall.ps1`, `status.bat`, `test_alarm.bat`, `README.txt`, `AlarmAutoDismiss-v1.6.1.zip`, `SHA256SUMS`). Redundant `v1.6.1/` directory deleted.
+- [x] **Public README.md Audit & Sanitization:** Overwrote root `README.md` with clean, public open-source documentation. Stripped internal sprint tags, private paths, internal memory references, and old version trees; added shields.io badges, feature table, quick start, configuration reference, and security principles.
+- [x] **Guardrail & Constraint Verification:** Confirmed root `AlarmSettings.ps1` remains strictly under 24KB limit (23,979 bytes).
 
 ---
 
 ## System Operational Summary
+- **GitHub Production Release (Root):** Complete, flattened, standalone, zero-dependency v1.6.1 release files.
+- **Active Development Workspace (`development/`):** Full isolated working environment for all future iterative development (git-ignored).
+- **Local Backup Archives (`_local_backups/`):** Historical versions (`v1.0-csharp`, `v1.6.0`) and deep research documents stored locally (git-ignored).
 - **Installed Package:** `%LOCALAPPDATA%\AlarmAutoDismiss` (Active, PID running, hardened).
-- **Active Release Directory:** `v1.6.1/` (Contains complete standalone package, `AlarmAutoDismiss-v1.6.1.zip`, and `SHA256SUMS`).
-- **Previous Release Snapshot:** `v1.6.0/` (Contains complete standalone package & `AlarmAutoDismiss-v1.6.0.zip`).
-- **Prototype Archive:** `v1.0-csharp/` (Contains original C# sources, build script, and legacy wrappers).
-- **Master Documentation:** Root folder contains strictly global project specs (`README.md`, `PROJECT.md`, `ROADMAP.md`, `changelog.md`, `LICENSE`, `SECURITY.md`, `.gitignore`, `Windows Alarm Auto-Shutoff Architecture.txt`, `Windows Automation Security Audit.txt`).
 - **Control Panel Access:** Available on Desktop and Start Menu ("Alarm Auto-Shutoff Settings").
 - **Smart App Control:** 100% compliant with zero unsigned binaries.
-- **Git Version Control:** Branch `main` initialized with root commit `1c9afc8`.
-- **Milestone State:** Release v1.6.1 hardened against all audit findings, verified live, and committed to Git.
+- **Git State:** Staged and ready for clean commit on branch `main`.
 
 ---
 
-## Immediate Next Step
-- Create a new repository on [GitHub.com](https://github.com/new) under the account `axisliminal`, link the remote with `git remote add origin ...`, and push the `main` branch.
+## Immediate Next Steps
+1. Execute `git add -A` and commit the streamlined structure: `refactor: streamline repository structure for v1.6.1 public release`.
+2. Push to GitHub remote `origin main` using `push_to_github.bat` or git CLI.
+3. Apply Google SEO & GitHub "About" metadata (description, topics, search keywords) to GitHub repository settings.
