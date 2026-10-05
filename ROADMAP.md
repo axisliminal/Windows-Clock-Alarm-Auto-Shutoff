@@ -1,9 +1,9 @@
 # Project Execution Roadmap & Live Status
 
-**Current Status:** SPRINT 16 IN PROGRESS (SECURITY HARDENING VERIFIED, READY FOR GIT COMMIT)  
-**Active Sprint:** Sprint 16: GitHub Publishing Preparation, Pre-Flight Sanitization & Security Hardening  
+**Current Status:** PRODUCTION READY & GIT-INITIALIZED (v1.6.1 HARDENED)  
+**Active Sprint:** Ready for GitHub Remote Push & Release Publishing  
 **Last Updated:** 2026-10-05  
-**Live Blocker:** Awaiting Git Author Identity (`user.name` / `user.email`) for Initial Commit  
+**Live Blocker:** None (Awaiting Remote Repository Creation on GitHub.com)  
 
 ---
 
@@ -113,7 +113,7 @@
 - [x] **Root Directory Purification:** Root folder now dedicated strictly to master repository documentation (`README.md`, `PROJECT.md`, `ROADMAP.md`, `changelog.md`, `GEMINI.md`, and architecture research).
 - [x] **Documentation & Navigation Synchronization:** Updated `README.md` Quick Start and directory tree to route through version folders.
 
-### [ ] Sprint 16: GitHub Publishing Preparation, Pre-Flight Sanitization & Security Hardening
+### [x] Sprint 16: GitHub Publishing Preparation, Pre-Flight Sanitization & Security Hardening
 - [x] **Requirements Alignment & User Preferences:** Public repository visibility confirmed, MIT license selected, automated winget Git CLI installation confirmed.
 - [x] **Git Toolchain & WinGet Verification:** Installed official `Git.MinGit` (v2.56.0) via `winget`, registered in Windows Package Manager database for `winget upgrade` support, alias configured in `%LOCALAPPDATA%\Microsoft\WinGet\Links`.
 - [x] **Pre-Flight Repository Sanitization:**
@@ -133,10 +133,9 @@
   - **Release Verification Manifest:** Automated canonical `SHA256SUMS` generation in release packager (`package_dist.ps1`).
   - **Guardrail Verification:** Verified `AlarmSettings.ps1` file size remains strictly within budget (23,979 / 24,000 bytes).
   - **Live Operational Verification:** Deployed hardened scripts to `%LOCALAPPDATA%\AlarmAutoDismiss`, verified active daemon, and passed 5-second synthetic test alarm audio/toast cutoff.
-- [ ] **Git Author Identity Configuration & Initial Commit:**
-  - Configure user's Git author name and email.
-  - Create initial commit on `main`.
-  - Link remote repository and publish.
+- [x] **Git Author Identity Configuration & Initial Commit:**
+  - Configured Git credentials: `axisliminal <amananmahajan@gmail.com>`.
+  - Generated initial root commit `1c9afc8` on branch `main` (51 files committed, working tree clean).
 
 ---
 
@@ -145,12 +144,13 @@
 - **Active Release Directory:** `v1.6.1/` (Contains complete standalone package, `AlarmAutoDismiss-v1.6.1.zip`, and `SHA256SUMS`).
 - **Previous Release Snapshot:** `v1.6.0/` (Contains complete standalone package & `AlarmAutoDismiss-v1.6.0.zip`).
 - **Prototype Archive:** `v1.0-csharp/` (Contains original C# sources, build script, and legacy wrappers).
-- **Master Documentation:** Root folder contains strictly global project specs (`README.md`, `PROJECT.md`, `ROADMAP.md`, `changelog.md`, `LICENSE`, `SECURITY.md`, `.gitignore`).
+- **Master Documentation:** Root folder contains strictly global project specs (`README.md`, `PROJECT.md`, `ROADMAP.md`, `changelog.md`, `LICENSE`, `SECURITY.md`, `.gitignore`, `Windows Alarm Auto-Shutoff Architecture.txt`, `Windows Automation Security Audit.txt`).
 - **Control Panel Access:** Available on Desktop and Start Menu ("Alarm Auto-Shutoff Settings").
 - **Smart App Control:** 100% compliant with zero unsigned binaries.
-- **Milestone State:** Release v1.6.1 hardened against all audit findings, verified live, and staged for Git commit.
+- **Git Version Control:** Branch `main` initialized with root commit `1c9afc8`.
+- **Milestone State:** Release v1.6.1 hardened against all audit findings, verified live, and committed to Git.
 
 ---
 
 ## Immediate Next Step
-- Configure Git author name and email for the repository, create the initial commit on `main`, and provide the commands to connect your GitHub remote repository.
+- Create a new repository on [GitHub.com](https://github.com/new) under the account `axisliminal`, link the remote with `git remote add origin ...`, and push the `main` branch.
