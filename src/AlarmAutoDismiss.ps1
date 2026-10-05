@@ -1,4 +1,4 @@
-﻿param(
+param(
     [string]$Action = "daemon",
     [int]$TestSeconds = 10
 )
@@ -82,9 +82,22 @@ function Send-SilentMissedToast([string]$title, [string]$body) {
 if ($Action -match "^[-/]?stop$") {
     Write-Host "Sending stop signal to AlarmAutoDismiss..."
     Set-Content -Path $stopSignalPath -Value "STOP" -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 2
-    # Also terminate any running powershell daemon process targeting this script
+    $gracefulExit = $false
+    for ($i = 0; $i -lt 6; $i++) {
+        Start-Sleep -Milliseconds 500
+        try {
+            $m = [System.Threading.Mutex]::OpenExisting("Local\AlarmAutoDismiss_PS1_SingleInstance")
+            $m.Close()
+        } catch {
+            $gracefulExit = $true
+            break
+        }
+    }
+    # Also terminate any running powershell daemon process targeting this script in current session
+    $currSession = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
     $daemons = Get-CimInstance Win32_Process | Where-Object { 
+        $_.Name -match '^powershell\.exe$' -and
+        $_.SessionId -eq $currSession -and
         $_.CommandLine -like "*AlarmAutoDismiss.ps1*" -and 
         $_.CommandLine -notlike "*-Action*" -and
         $_.ProcessId -ne $PID 
@@ -94,6 +107,8 @@ if ($Action -match "^[-/]?stop$") {
             Stop-Process -Id $d.ProcessId -Force -ErrorAction SilentlyContinue
         }
         Write-Host "AlarmAutoDismiss stopped successfully."
+    } elseif ($gracefulExit) {
+        Write-Host "AlarmAutoDismiss stopped gracefully."
     } else {
         Write-Host "AlarmAutoDismiss was not running."
     }
@@ -172,8 +187,10 @@ if ($Action -match "^[-/]?test$") {
     $listener = [Windows.UI.Notifications.Management.UserNotificationListener]::Current
     $op = $listener.GetNotificationsAsync([Windows.UI.Notifications.NotificationKinds]::Toast)
     $task = $asTaskGeneric.MakeGenericMethod([System.Collections.Generic.IReadOnlyList[Windows.UI.Notifications.UserNotification]]).Invoke($null, @($op))
-    $task.Wait()
-    $notifs = $task.Result
+    if (-not $task.Wait(15000)) {
+        Write-Host "WARNING: Notification query timed out after 15s."
+    }
+    $notifs = if ($task.Status -eq "RanToCompletion") { $task.Result } else { @() }
 
     $dismissed = $false
     foreach ($n in $notifs) {
@@ -222,10 +239,8 @@ try {
     Write-Log "SECURITY ALERT: Mutex exists with an incompatible DACL. Possible squatting attack."
     exit 1
 } catch {
-    # Fallback to standard constructor if MutexSecurity is restricted in current context
-    try {
-        $mutex = New-Object System.Threading.Mutex($true, "Local\AlarmAutoDismiss_PS1_SingleInstance", [ref]$mutexCreated)
-    } catch {}
+    Write-Log "ERROR creating single-instance mutex with DACL: $($_.Exception.Message)"
+    exit 1
 }
 
 if (-not $mutexCreated) {
@@ -245,103 +260,49 @@ try {
         } catch {}
     }
 
-# Define EcoQoS and memory compaction helper if not already loaded
-if (-not ([System.Management.Automation.PSTypeName]'ProcessEcoMode').Type) {
+# Define EcoQoS and memory compaction helper via pure in-memory Reflection.Emit (zero-disk, zero-csc.exe)
+if (-not ([System.Management.Automation.PSTypeName]'NativeEco').Type) {
     try {
-        Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-
-public static class ProcessEcoMode
-{
-    [DllImport("kernel32.dll", SetLastError = true)]
-    public static extern IntPtr GetCurrentProcess();
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    public static extern bool SetProcessInformation(
-        IntPtr hProcess,
-        int ProcessInformationClass,
-        ref PROCESS_POWER_THROTTLING_STATE ProcessInformation,
-        uint ProcessInformationSize
-    );
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    public static extern bool SetProcessWorkingSetSize(IntPtr hProcess, IntPtr dwMinimumWorkingSetSize, IntPtr dwMaximumWorkingSetSize);
-
-    public const int ProcessPowerThrottling = 4;
-    public const uint PROCESS_POWER_THROTTLING_CURRENT_VERSION = 1;
-    public const uint PROCESS_POWER_THROTTLING_EXECUTION_SPEED = 0x1;
-    public const uint PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION = 0x4;
-
-    [StructLayout(LayoutKind.Sequential, Pack = 4)]
-    public struct PROCESS_POWER_THROTTLING_STATE
-    {
-        public uint Version;
-        public uint ControlMask;
-        public uint StateMask;
-    }
-
-    public static bool EnableEcoQoS()
-    {
-        try {
-            PROCESS_POWER_THROTTLING_STATE state = new PROCESS_POWER_THROTTLING_STATE();
-            state.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
-            state.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
-            state.StateMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
-
-            return SetProcessInformation(
-                GetCurrentProcess(),
-                ProcessPowerThrottling,
-                ref state,
-                (uint)Marshal.SizeOf(typeof(PROCESS_POWER_THROTTLING_STATE))
-            );
-        } catch {
-            return false;
-        }
-    }
-
-    public static void TrimWorkingSet()
-    {
-        try {
-            SetProcessWorkingSetSize(GetCurrentProcess(), (IntPtr)(-1), (IntPtr)(-1));
-        } catch { }
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct LASTINPUTINFO
-    {
-        public uint cbSize;
-        public uint dwTime;
-    }
-
-    [DllImport("user32.dll")]
-    public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
-
-    public static uint GetIdleTimeSeconds()
-    {
-        try {
-            LASTINPUTINFO lii = new LASTINPUTINFO();
-            lii.cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO));
-            if (GetLastInputInfo(ref lii))
-            {
-                uint currentTick = (uint)Environment.TickCount;
-                uint diff = (currentTick >= lii.dwTime) ? (currentTick - lii.dwTime) : (uint.MaxValue - lii.dwTime + currentTick);
-                return diff / 1000;
-            }
-        } catch { }
-        return 0;
-    }
-}
-'@
+        $a = [AppDomain]::CurrentDomain.DefineDynamicAssembly((New-Object Reflection.AssemblyName 'NativeEcoAsm'), 1).DefineDynamicModule('M').DefineType('NativeEco', 1025)
+        $a.DefinePInvokeMethod('SetProcessWorkingSetSize', 'kernel32.dll', 22, 1, [bool], @([IntPtr], [IntPtr], [IntPtr]), 1, 3).SetImplementationFlags(128)
+        $a.DefinePInvokeMethod('SetProcessInformation', 'kernel32.dll', 22, 1, [bool], @([IntPtr], [int], [byte[]], [uint32]), 1, 3).SetImplementationFlags(128)
+        $a.DefinePInvokeMethod('GetLastInputInfo', 'user32.dll', 22, 1, [bool], @([byte[]]), 1, 3).SetImplementationFlags(128)
+        [void]$a.CreateType()
     } catch {}
+}
+
+function Enable-EcoQoS {
+    try {
+        [byte[]]$s = New-Object byte[] 12
+        [BitConverter]::GetBytes([uint32]1).CopyTo($s, 0)
+        [BitConverter]::GetBytes([uint32]5).CopyTo($s, 4)
+        [BitConverter]::GetBytes([uint32]5).CopyTo($s, 8)
+        return [NativeEco]::SetProcessInformation([IntPtr]-1, 4, $s, 12)
+    } catch { return $false }
+}
+
+function Trim-WorkingSet {
+    try {
+        [void][NativeEco]::SetProcessWorkingSetSize([IntPtr]-1, [IntPtr]-1, [IntPtr]-1)
+    } catch {}
+}
+
+function Get-IdleTimeSeconds {
+    try {
+        [byte[]]$b = New-Object byte[] 8
+        [BitConverter]::GetBytes([uint32]8).CopyTo($b, 0)
+        if ([NativeEco]::GetLastInputInfo($b)) {
+            $diff = [uint32][Environment]::TickCount - [BitConverter]::ToUInt32($b, 4)
+            return [uint32][math]::Floor($diff / 1000)
+        }
+    } catch {}
+    return [uint32]0
 }
 
 # Opt into Windows 11 EcoQoS (Efficiency Mode)
 $ecoSuccess = $false
 try {
-    $ecoSuccess = [ProcessEcoMode]::EnableEcoQoS()
+    $ecoSuccess = Enable-EcoQoS
 } catch {}
 
 Remove-Item $stopSignalPath -Force -ErrorAction SilentlyContinue
@@ -370,7 +331,7 @@ try {
 try {
     [System.GC]::Collect()
     [System.GC]::WaitForPendingFinalizers()
-    [ProcessEcoMode]::TrimWorkingSet()
+    Trim-WorkingSet
     $initMb = [math]::Round((Get-Process -Id $PID).WorkingSet64 / 1MB, 2)
     Write-Log "Initial memory compaction applied. Active working set: ${initMb} MB."
 } catch {}
@@ -386,7 +347,7 @@ try {
             try {
                 [System.GC]::Collect()
                 [System.GC]::WaitForPendingFinalizers()
-                [ProcessEcoMode]::TrimWorkingSet()
+                Trim-WorkingSet
             } catch {}
         }
     }
@@ -399,7 +360,7 @@ try {
             try {
                 [System.GC]::Collect()
                 [System.GC]::WaitForPendingFinalizers()
-                [ProcessEcoMode]::TrimWorkingSet()
+                Trim-WorkingSet
             } catch {}
         } elseif ($e.Reason -eq [Microsoft.Win32.SessionSwitchReason]::SessionLock) {
             Write-Log "WATCHDOG: Workstation locked. Background alarm monitoring active."
@@ -467,7 +428,11 @@ while ($true) {
         # Query active toast notifications
         $op = $listener.GetNotificationsAsync([Windows.UI.Notifications.NotificationKinds]::Toast)
         $task = $asTaskGeneric.MakeGenericMethod([System.Collections.Generic.IReadOnlyList[Windows.UI.Notifications.UserNotification]]).Invoke($null, @($op))
-        $null = $task.Wait(4000)
+        if (-not $task.Wait(15000)) {
+            Write-Log "WARNING: UserNotificationListener query timed out after 15000ms."
+            Start-Sleep -Seconds $checkIntervalSeconds
+            continue
+        }
         $notifs = $task.Result
 
         $currentIds = [System.Collections.Generic.HashSet[uint32]]::new()
@@ -501,7 +466,7 @@ while ($true) {
                                 foreach ($t in $b.GetTextElements()) {
                                     if ($t.Text) {
                                         if ($t.Text.Contains($testTag)) { $isTestToast = $true }
-                                        if ($t.Text -match "(?i)\btimer\b") { $isTimer = $true }
+                                        if ($t.Text -match "(?i)\b(timer|minuteur|temporizador|temporizzatore|таймер|タイマー|计时器|計時器|타이머|टाइमर)\b") { $isTimer = $true }
                                     }
                                 }
                             }
@@ -535,7 +500,7 @@ while ($true) {
                     if ($elapsed -ge $effectiveThreshold) {
                         # Smart Idle Gating check: delay shutoff if user actively used keyboard/mouse within last 30s
                         if ($smartIdleGating -and -not $isTestToast) {
-                            $idleSec = [ProcessEcoMode]::GetIdleTimeSeconds()
+                            $idleSec = Get-IdleTimeSeconds
                             if ($idleSec -lt 30) {
                                 # Hard ceiling: allow maximum 60s grace period beyond threshold
                                 $maxGraceCeiling = $effectiveThreshold + 60
@@ -576,7 +541,7 @@ while ($true) {
                         try {
                             [System.GC]::Collect()
                             [System.GC]::WaitForPendingFinalizers()
-                            [ProcessEcoMode]::TrimWorkingSet()
+                            Trim-WorkingSet
                         } catch {}
                     }
                 }
@@ -597,7 +562,7 @@ while ($true) {
                 try {
                     [System.GC]::Collect()
                     [System.GC]::WaitForPendingFinalizers()
-                    [ProcessEcoMode]::TrimWorkingSet()
+                    Trim-WorkingSet
                 } catch {}
             }
         } catch {
@@ -610,7 +575,7 @@ while ($true) {
             try {
                 [System.GC]::Collect()
                 [System.GC]::WaitForPendingFinalizers()
-                [ProcessEcoMode]::TrimWorkingSet()
+                Trim-WorkingSet
                 $curMb = [math]::Round((Get-Process -Id $PID).WorkingSet64 / 1MB, 2)
                 Write-Log "Steady-state memory compaction applied. Active working set: ${curMb} MB."
             } catch {}
@@ -624,8 +589,18 @@ while ($true) {
             try {
                 [System.GC]::Collect()
                 [System.GC]::WaitForPendingFinalizers()
-                [ProcessEcoMode]::TrimWorkingSet()
+                Trim-WorkingSet
             } catch {}
+
+            # In-loop periodic log rotation (>512 KB to tail 500 lines)
+            if (Test-Path $logPath) {
+                try {
+                    if ((Get-Item $logPath).Length -gt 512KB) {
+                        $tailLines = Get-Content -Path $logPath -Tail 500 -Encoding UTF8 -ErrorAction SilentlyContinue
+                        Set-Content -Path $logPath -Value $tailLines -Encoding UTF8 -ErrorAction SilentlyContinue
+                    }
+                } catch {}
+            }
         }
 
         Start-Sleep -Seconds $checkIntervalSeconds

@@ -1,9 +1,11 @@
-﻿# AlarmSettings.ps1 - WinUI 11 Control Panel
+# AlarmSettings.ps1 - WinUI 11 Control Panel
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System
 
-if (-not ([System.Management.Automation.PSTypeName]'Win32.DwmBackdrop').Type) {
+if (-not ([System.Management.Automation.PSTypeName]'Win32.Dwm').Type) {
     try {
-        Add-Type 'using System;using System.Runtime.InteropServices;namespace Win32{public static class DwmBackdrop{[DllImport("dwmapi.dll")]public static extern int DwmSetWindowAttribute(IntPtr h,int a,ref int v,int s);public const int DWMWA_USE_IMMERSIVE_DARK_MODE=20,DWMWA_SYSTEMBACKDROP_TYPE=38,DWMSBT_MAINWINDOW=2;}}'
+        $t = [AppDomain]::CurrentDomain.DefineDynamicAssembly((New-Object Reflection.AssemblyName 'Dwm'), 1).DefineDynamicModule('M').DefineType('Win32.Dwm', 1025)
+        $t.DefinePInvokeMethod('DwmSetWindowAttribute', 'dwmapi.dll', 22, 1, [int], @([IntPtr], [int], [int].MakeByRefType(), [int]), 1, 3).SetImplementationFlags(128)
+        [void]$t.CreateType()
     } catch {}
 }
 
@@ -43,6 +45,7 @@ function Set-StartupEnabled([bool]$enable) {
     if ($enable) {
         $cmd = "`"$psExe`" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$daemonScript`""
         Set-ItemProperty $runRegPath $runRegName -Value $cmd -Type String -Force -ErrorAction SilentlyContinue
+        Remove-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" $runRegName -Force -ErrorAction SilentlyContinue
     } else {
         Remove-ItemProperty $runRegPath $runRegName -ErrorAction SilentlyContinue
     }
@@ -80,13 +83,17 @@ function Save-ConfigSettings([int]$timeout, [int]$timerTimeout, [bool]$smartIdle
         loggingEnabled = $logEn
     } | ConvertTo-Json
     $tmp = "$configPath.tmp"
-    [System.IO.File]::WriteAllText($tmp, $json, [System.Text.Encoding]::UTF8)
     try {
+        [System.IO.File]::WriteAllText($tmp, $json, [System.Text.Encoding]::UTF8)
         if (Test-Path $configPath) { [System.IO.File]::Replace($tmp, $configPath, $null) }
         else { [System.IO.File]::Move($tmp, $configPath) }
-    } catch { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+        return $true
+    } catch {
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+        return $false
+    }
 }
-[xml]$xaml = @"
+[xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Alarm Auto-Shutoff"
@@ -99,24 +106,14 @@ function Save-ConfigSettings([int]$timeout, [int]$timerTimeout, [bool]$smartIdle
 <Setter Property="BorderBrush" Value="#383838"/><Setter Property="BorderThickness" Value="1"/>
 <Setter Property="Padding" Value="12,4"/><Setter Property="Cursor" Value="Hand"/>
 <Setter Property="FontSize" Value="13"/><Setter Property="FontWeight" Value="SemiBold"/>
-<Setter Property="Template">
-<Setter.Value>
-<ControlTemplate TargetType="Button">
-<Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="6">
-<ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="{TemplateBinding Padding}"/>
-</Border>
-</ControlTemplate>
-</Setter.Value>
-</Setter>
+<Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button"><Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="6"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="{TemplateBinding Padding}"/></Border></ControlTemplate></Setter.Value></Setter>
 <Style.Triggers>
 <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="#383838"/><Setter Property="BorderBrush" Value="#4A4A4A"/></Trigger>
 <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/><Setter Property="Cursor" Value="Arrow"/></Trigger>
 </Style.Triggers>
 </Style>
 <Style x:Key="Card" TargetType="Border">
-<Setter Property="Background" Value="#D0202020"/><Setter Property="BorderBrush" Value="#353535"/>
-<Setter Property="BorderThickness" Value="1"/><Setter Property="CornerRadius" Value="8"/>
-<Setter Property="Padding" Value="12"/><Setter Property="Margin" Value="0,0,0,10"/>
+<Setter Property="Background" Value="#D0202020"/><Setter Property="BorderBrush" Value="#353535"/><Setter Property="BorderThickness" Value="1"/><Setter Property="CornerRadius" Value="8"/><Setter Property="Padding" Value="12"/><Setter Property="Margin" Value="0,0,0,10"/>
 </Style>
 </Window.Resources>
 <ScrollViewer VerticalScrollBarVisibility="Auto">
@@ -128,7 +125,7 @@ function Save-ConfigSettings([int]$timeout, [int]$timerTimeout, [bool]$smartIdle
 <TextBlock Text="Clock Auto-Dismiss Settings" FontSize="12" Foreground="#9E9E9E" Margin="0,2,0,0"/>
 </StackPanel>
 <Border Grid.Column="1" Background="#242830" BorderBrush="#303848" BorderThickness="1" CornerRadius="12" Padding="10,3" VerticalAlignment="Center">
-<TextBlock Text="v1.6.1 | Self-Healing" FontSize="11" Foreground="#4DA3FF" FontWeight="SemiBold"/>
+<TextBlock Text="v1.6.4 | Pure Memory" FontSize="11" Foreground="#4DA3FF" FontWeight="SemiBold"/>
 </Border>
 </Grid>
 <Border Style="{StaticResource Card}">
@@ -154,11 +151,7 @@ function Save-ConfigSettings([int]$timeout, [int]$timerTimeout, [bool]$smartIdle
 <TextBlock Text="Separate shutoff limits for alarms and timers." FontSize="12" Foreground="#888888" Margin="0,0,0,8"/>
 <TextBlock Text="Wake-Up Alarms Timeout" FontSize="12" FontWeight="SemiBold" Foreground="#E0E0E0" Margin="0,0,0,4"/>
 <WrapPanel Margin="0,0,0,6">
-<Button x:Name="BtnPreset1m" Content="1 min" Margin="0,0,6,4" Padding="10,3"/>
-<Button x:Name="BtnPreset2m" Content="2 min" Margin="0,0,6,4" Padding="10,3"/>
-<Button x:Name="BtnPreset3m" Content="3 min" Margin="0,0,6,4" Padding="10,3"/>
-<Button x:Name="BtnPreset5m" Content="5 min (Default)" Margin="0,0,6,4" Padding="12,3" Background="#005A9E" BorderBrush="#0078D4"/>
-<Button x:Name="BtnPreset10m" Content="10 min" Margin="0,0,6,4" Padding="10,3"/>
+<Button x:Name="BtnPreset1m" Content="1 min" Margin="0,0,6,4" Padding="10,3"/><Button x:Name="BtnPreset2m" Content="2 min" Margin="0,0,6,4" Padding="10,3"/><Button x:Name="BtnPreset3m" Content="3 min" Margin="0,0,6,4" Padding="10,3"/><Button x:Name="BtnPreset5m" Content="5 min (Default)" Margin="0,0,6,4" Padding="12,3" Background="#005A9E" BorderBrush="#0078D4"/><Button x:Name="BtnPreset10m" Content="10 min" Margin="0,0,6,4" Padding="10,3"/>
 </WrapPanel>
 <Grid Margin="0,0,0,8">
 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="105"/></Grid.ColumnDefinitions>
@@ -169,10 +162,7 @@ function Save-ConfigSettings([int]$timeout, [int]$timerTimeout, [bool]$smartIdle
 </Grid>
 <TextBlock Text="Countdown Timers Timeout" FontSize="12" FontWeight="SemiBold" Foreground="#E0E0E0" Margin="0,2,0,4"/>
 <WrapPanel Margin="0,0,0,6">
-<Button x:Name="BtnTimer30s" Content="30 sec" Margin="0,0,6,4" Padding="10,3"/>
-<Button x:Name="BtnTimer1m" Content="1 min (Default)" Margin="0,0,6,4" Padding="12,3" Background="#005A9E" BorderBrush="#0078D4"/>
-<Button x:Name="BtnTimer2m" Content="2 min" Margin="0,0,6,4" Padding="10,3"/>
-<Button x:Name="BtnTimer5m" Content="5 min" Margin="0,0,6,4" Padding="10,3"/>
+<Button x:Name="BtnTimer30s" Content="30 sec" Margin="0,0,6,4" Padding="10,3"/><Button x:Name="BtnTimer1m" Content="1 min (Default)" Margin="0,0,6,4" Padding="12,3" Background="#005A9E" BorderBrush="#0078D4"/><Button x:Name="BtnTimer2m" Content="2 min" Margin="0,0,6,4" Padding="10,3"/><Button x:Name="BtnTimer5m" Content="5 min" Margin="0,0,6,4" Padding="10,3"/>
 </WrapPanel>
 <Grid Margin="0,0,0,12">
 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="105"/></Grid.ColumnDefinitions>
@@ -225,7 +215,7 @@ function Save-ConfigSettings([int]$timeout, [int]$timerTimeout, [bool]$smartIdle
 </StackPanel>
 </ScrollViewer>
 </Window>
-"@
+'@
 
 $reader = [System.Xml.XmlNodeReader]::new($xaml)
 $window = [System.Windows.Markup.XamlReader]::Load($reader)
@@ -235,22 +225,13 @@ $window.Add_SourceInitialized({
     try {
         $hwnd = ([System.Windows.Interop.WindowInteropHelper]::new($window)).Handle
         $dark = 1
-        [Win32.DwmBackdrop]::DwmSetWindowAttribute($hwnd, [Win32.DwmBackdrop]::DWMWA_USE_IMMERSIVE_DARK_MODE, [ref]$dark, 4) | Out-Null
-        $mica = [Win32.DwmBackdrop]::DWMSBT_MAINWINDOW
-        [Win32.DwmBackdrop]::DwmSetWindowAttribute($hwnd, [Win32.DwmBackdrop]::DWMWA_SYSTEMBACKDROP_TYPE, [ref]$mica, 4) | Out-Null
+        [Win32.Dwm]::DwmSetWindowAttribute($hwnd, 20, [ref]$dark, 4) | Out-Null
+        $mica = 2
+        [Win32.Dwm]::DwmSetWindowAttribute($hwnd, 38, [ref]$mica, 4) | Out-Null
     } catch {}
 })
 
-$statusDot=$window.FindName("StatusDot"); $statusText=$window.FindName("StatusText")
-$btnStart=$window.FindName("BtnStart"); $btnStop=$window.FindName("BtnStop"); $btnRestart=$window.FindName("BtnRestart")
-$btnPreset1m=$window.FindName("BtnPreset1m"); $btnPreset2m=$window.FindName("BtnPreset2m"); $btnPreset3m=$window.FindName("BtnPreset3m"); $btnPreset5m=$window.FindName("BtnPreset5m"); $btnPreset10m=$window.FindName("BtnPreset10m")
-$timeoutSlider=$window.FindName("TimeoutSlider"); $timeoutDisplay=$window.FindName("TimeoutDisplay")
-$btnTimer30s=$window.FindName("BtnTimer30s"); $btnTimer1m=$window.FindName("BtnTimer1m"); $btnTimer2m=$window.FindName("BtnTimer2m"); $btnTimer5m=$window.FindName("BtnTimer5m")
-$timerSlider=$window.FindName("TimerSlider"); $timerDisplay=$window.FindName("TimerDisplay")
-$chkSmartIdle=$window.FindName("ChkSmartIdle"); $chkNotify=$window.FindName("ChkNotify"); $chkStartup=$window.FindName("ChkStartup")
-$btnSave=$window.FindName("BtnSave"); $saveFeedback=$window.FindName("SaveFeedback")
-$btnTestAlarm=$window.FindName("BtnTestAlarm"); $testStatusText=$window.FindName("TestStatusText"); $testProgressBar=$window.FindName("TestProgressBar")
-$logViewer=$window.FindName("LogViewer"); $btnRefreshLog=$window.FindName("BtnRefreshLog"); $btnClearLog=$window.FindName("BtnClearLog")
+foreach ($n in @("StatusDot","StatusText","BtnStart","BtnStop","BtnRestart","BtnPreset1m","BtnPreset2m","BtnPreset3m","BtnPreset5m","BtnPreset10m","TimeoutSlider","TimeoutDisplay","BtnTimer30s","BtnTimer1m","BtnTimer2m","BtnTimer5m","TimerSlider","TimerDisplay","ChkSmartIdle","ChkNotify","ChkStartup","BtnSave","SaveFeedback","BtnTestAlarm","TestStatusText","TestProgressBar","LogViewer","BtnRefreshLog","BtnClearLog")) { Set-Variable -Name $n -Value $window.FindName($n) }
 
 $cfgData = Load-ConfigSettings
 $timeoutSlider.Value = $cfgData.timeout
@@ -331,15 +312,12 @@ $btnStop.Add_Click({ Stop-DaemonService; Start-Sleep -Milliseconds 600; Update-S
 $btnRestart.Add_Click({ Stop-DaemonService; Start-Sleep -Milliseconds 400; Start-DaemonService; Start-Sleep -Milliseconds 600; Update-ServiceStatusUI; Refresh-LogViewer })
 
 $btnSave.Add_Click({
-    Save-ConfigSettings ([int]$timeoutSlider.Value) ([int]$timerSlider.Value) ([bool]$chkSmartIdle.IsChecked) ([bool]$chkNotify.IsChecked)
+    $ok = Save-ConfigSettings ([int]$timeoutSlider.Value) ([int]$timerSlider.Value) ([bool]$chkSmartIdle.IsChecked) ([bool]$chkNotify.IsChecked)
     Set-StartupEnabled ([bool]$chkStartup.IsChecked)
-    $saveFeedback.Text = "[OK] Settings saved! Dynamically reloaded by service."
-    $saveFeedback.Foreground = $brGreen
-    $t = [System.Windows.Threading.DispatcherTimer]::new()
-    $t.Interval = [TimeSpan]::FromSeconds(3)
-    $t.Add_Tick({ $saveFeedback.Text = ""; $t.Stop() })
-    $t.Start()
-    Refresh-LogViewer
+    if ($ok) { $saveFeedback.Text = "[OK] Settings saved! Dynamically reloaded."; $saveFeedback.Foreground = $brGreen }
+    else { $saveFeedback.Text = "[!] Error saving config.json."; $saveFeedback.Foreground = $brRed }
+    $t = [System.Windows.Threading.DispatcherTimer]::new(); $t.Interval = [TimeSpan]::FromSeconds(3)
+    $t.Add_Tick({ $saveFeedback.Text = ""; $t.Stop() }); $t.Start(); Refresh-LogViewer
 })
 
 $script:testTimer = $null
@@ -400,12 +378,17 @@ $btnTestAlarm.Add_Click({
                 $op = $listener.GetNotificationsAsync([Windows.UI.Notifications.NotificationKinds]::Toast)
                 $asTask = [System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' } | Select-Object -First 1
                 $task = $asTask.MakeGenericMethod([System.Collections.Generic.IReadOnlyList[Windows.UI.Notifications.UserNotification]]).Invoke($null, @($op))
-                $null = $task.Wait(1500)
-                foreach ($n in $task.Result) {
-                    try {
-                        $b = $n.Notification.Visual.GetBinding("ToastGeneric")
-                        if ($b -and ($b.GetTextElements()[0].Text -like "*AlarmAutoDismiss-Test*")) { $listener.RemoveNotification($n.Id) }
-                    } catch {}
+                if ($task.Wait(15000)) {
+                    foreach ($n in $task.Result) {
+                        try {
+                            $b = $n.Notification.Visual.GetBinding("ToastGeneric")
+                            if ($b) {
+                                foreach ($t in $b.GetTextElements()) {
+                                    if ($t.Text -and $t.Text.Contains("AlarmAutoDismiss-Test")) { $listener.RemoveNotification($n.Id) }
+                                }
+                            }
+                        } catch {}
+                    }
                 }
             } catch {}
 
