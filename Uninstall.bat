@@ -2,11 +2,10 @@
 setlocal EnableExtensions DisableDelayedExpansion
 cd /d "%~dp0"
 set "PS_EXE=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
-title Alarm Auto-Shutoff - Uninstaller
+title Alarm Auto-Shutoff - Uninstall
 
-if /i "%~1"=="/silent" goto :silent
-if /i "%~1"=="-silent" goto :silent
-if /i "%~1"=="/s" goto :silent
+if /i "%~1"=="/silent" goto :proceed
+if /i "%~1"=="-silent" goto :proceed
 
 echo ========================================================
 echo   Windows Clock Alarm Auto-Shutoff - Uninstall
@@ -21,29 +20,26 @@ if errorlevel 1 goto :proceed
 
 :proceed
 echo.
-"%PS_EXE%" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0Uninstall.ps1"
+echo Uninstalling...
+"%PS_EXE%" -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process|Where-Object{$_.CommandLine -like '*AlarmAutoDismiss.ps1*'}|ForEach-Object{Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue}; Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'AlarmAutoDismiss' -Force -ErrorAction SilentlyContinue; Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run' -Name 'AlarmAutoDismiss' -Force -ErrorAction SilentlyContinue; foreach($dir in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetFolderPath('Programs'))){$lnk=Join-Path $dir 'Alarm Auto-Shutoff Settings.lnk'; if(Test-Path $lnk){Remove-Item $lnk -Force -ErrorAction SilentlyContinue}}; Write-Host 'Service stopped, auto-start and shortcuts removed.' -ForegroundColor Green"
+
 set "CURRDIR=%~dp0"
 set "TARGETAPP=%LOCALAPPDATA%\AlarmAutoDismiss\"
 if /i "%CURRDIR%"=="%TARGETAPP%" (
-    echo.
-    echo Uninstallation complete. Terminal will exit to release directory lock...
+    echo Cleaning up installation files...
     timeout /t 2 /nobreak >nul
+    start "" cmd /c "rd /s /q \"%LOCALAPPDATA%\AlarmAutoDismiss\""
     exit
 )
 goto :done
 
-:silent
-"%PS_EXE%" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0Uninstall.ps1" -Silent
-goto :end
-
 :cancel
 echo.
-echo Uninstallation cancelled. No changes were made.
+echo Uninstallation cancelled. No changes made.
 goto :done
 
 :done
 echo.
 pause
 
-:end
 endlocal

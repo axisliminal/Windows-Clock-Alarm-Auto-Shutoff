@@ -1,12 +1,14 @@
-param(
+﻿param(
     [string]$Action = "daemon",
     [int]$TestSeconds = 10
 )
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$logPath = Join-Path $scriptDir "alarm_history.log"
-$configPath = Join-Path $scriptDir "config.json"
-$stopSignalPath = Join-Path $scriptDir ".stop_signal"
+$pDir = Split-Path -Parent $scriptDir
+$baseDir = if (Test-Path (Join-Path $pDir "config.json")) { $pDir } else { $scriptDir }
+$logPath = Join-Path $baseDir "alarm_history.log"
+$configPath = Join-Path $baseDir "config.json"
+$stopSignalPath = Join-Path $baseDir ".stop_signal"
 $targetPackage = "Microsoft.WindowsAlarms_8wekyb3d8bbwe"
 $testTag = "AlarmAutoDismiss-Test"
 
@@ -644,3 +646,4 @@ while ($true) {
         $mutex.Close()
     }
 }
+

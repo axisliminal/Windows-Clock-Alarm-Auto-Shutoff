@@ -1,12 +1,4 @@
-# Local backup archives (historical versions and raw research notes)
-_local_backups/
-backups/
-
-# Local development workspace (ongoing work, tests, build tools, maintenance scripts)
-development/
-push_to_github.bat
-
-# Runtime and diagnostic logs
+# Runtime logs and signal files
 *.log
 alarm_history.log
 .stop_signal
@@ -16,12 +8,7 @@ Thumbs.db
 Desktop.ini
 $RECYCLE.BIN/
 
-# Development, IDE & Editor artifacts
+# Editor and IDE artifacts
 .vs/
 .vscode/
-*.suo
-*.user
 *.tmp
-
-# Assistant and local AI session artifacts
-.gemini/

@@ -1,16 +1,17 @@
-# AlarmSettings.ps1 - WinUI 11 Control Panel
+﻿# AlarmSettings.ps1 - WinUI 11 Control Panel
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System
 
 if (-not ([System.Management.Automation.PSTypeName]'Win32.DwmBackdrop').Type) {
     try {
-        Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;namespace Win32{public static class DwmBackdrop{[DllImport("dwmapi.dll")]public static extern int DwmSetWindowAttribute(IntPtr h,int a,ref int v,int s);public const int DWMWA_USE_IMMERSIVE_DARK_MODE=20;public const int DWMWA_SYSTEMBACKDROP_TYPE=38;public const int DWMSBT_MAINWINDOW=2;}}'
+        Add-Type 'using System;using System.Runtime.InteropServices;namespace Win32{public static class DwmBackdrop{[DllImport("dwmapi.dll")]public static extern int DwmSetWindowAttribute(IntPtr h,int a,ref int v,int s);public const int DWMWA_USE_IMMERSIVE_DARK_MODE=20,DWMWA_SYSTEMBACKDROP_TYPE=38,DWMSBT_MAINWINDOW=2;}}'
     } catch {}
 }
 
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } elseif ($MyInvocation.MyCommand.Path) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { (Get-Location).Path }
-$daemonScript = Join-Path $scriptDir "AlarmAutoDismiss.ps1"
-$configPath   = Join-Path $scriptDir "config.json"
-$logPath      = Join-Path $scriptDir "alarm_history.log"
+$baseDir = if (Test-Path (Join-Path (Split-Path -Parent $scriptDir) "config.json")) { Split-Path -Parent $scriptDir } else { $scriptDir }
+$daemonScript = if (Test-Path (Join-Path $scriptDir "AlarmAutoDismiss.ps1")) { Join-Path $scriptDir "AlarmAutoDismiss.ps1" } else { Join-Path $baseDir "src\AlarmAutoDismiss.ps1" }
+$configPath = Join-Path $baseDir "config.json"
+$logPath = Join-Path $baseDir "alarm_history.log"
 $runRegPath   = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 $runRegName   = "AlarmAutoDismiss"
 $alarmWavPath = "C:\Windows\Media\Alarm01.wav"
@@ -35,15 +36,15 @@ function Stop-DaemonService {
 }
 
 function Get-StartupEnabled {
-    try { return ($null -ne (Get-ItemProperty -Path $runRegPath -Name $runRegName -ErrorAction SilentlyContinue)) } catch { return $false }
+    try { return ($null -ne (Get-ItemProperty $runRegPath $runRegName -ErrorAction SilentlyContinue)) } catch { return $false }
 }
 
 function Set-StartupEnabled([bool]$enable) {
     if ($enable) {
         $cmd = "`"$psExe`" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$daemonScript`""
-        Set-ItemProperty -Path $runRegPath -Name $runRegName -Value $cmd -Type String -Force -ErrorAction SilentlyContinue
+        Set-ItemProperty $runRegPath $runRegName -Value $cmd -Type String -Force -ErrorAction SilentlyContinue
     } else {
-        Remove-ItemProperty -Path $runRegPath -Name $runRegName -ErrorAction SilentlyContinue
+        Remove-ItemProperty $runRegPath $runRegName -ErrorAction SilentlyContinue
     }
 }
 
@@ -84,13 +85,14 @@ function Save-ConfigSettings([int]$timeout, [int]$timerTimeout, [bool]$smartIdle
         if (Test-Path $configPath) { [System.IO.File]::Replace($tmp, $configPath, $null) }
         else { [System.IO.File]::Move($tmp, $configPath) }
     } catch { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+}
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Alarm Auto-Shutoff"
-        Height="740" Width="600" WindowStartupLocation="CenterScreen" ResizeMode="CanMinimize"
+        Height="740" Width="600"  
         Background="Transparent" Foreground="#F0F0F0"
-        FontFamily="Segoe UI Variable Text, Segoe UI">
+        FontFamily="Segoe UI">
 <Window.Resources>
 <Style TargetType="Button">
 <Setter Property="Background" Value="#2B2B2B"/><Setter Property="Foreground" Value="#FFFFFF"/>
@@ -123,7 +125,7 @@ function Save-ConfigSettings([int]$timeout, [int]$timerTimeout, [bool]$smartIdle
 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
 <StackPanel Grid.Column="0">
 <TextBlock Text="Alarm Auto-Shutoff" FontSize="20" FontWeight="Bold" Foreground="#FFFFFF"/>
-<TextBlock Text="Windows Clock Auto-Dismissal Settings &amp; Monitor" FontSize="12" Foreground="#9E9E9E" Margin="0,2,0,0"/>
+<TextBlock Text="Clock Auto-Dismiss Settings" FontSize="12" Foreground="#9E9E9E" Margin="0,2,0,0"/>
 </StackPanel>
 <Border Grid.Column="1" Background="#242830" BorderBrush="#303848" BorderThickness="1" CornerRadius="12" Padding="10,3" VerticalAlignment="Center">
 <TextBlock Text="v1.6.1 | Self-Healing" FontSize="11" Foreground="#4DA3FF" FontWeight="SemiBold"/>
@@ -135,7 +137,7 @@ function Save-ConfigSettings([int]$timeout, [int]$timerTimeout, [bool]$smartIdle
 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
 <Ellipse x:Name="StatusDot" Width="10" Height="10" Fill="#107C41" Margin="0,0,10,0"/>
-<TextBlock x:Name="StatusText" Text="Service Running (Active)" FontSize="14" FontWeight="Bold" Foreground="#FFFFFF"/>
+<TextBlock x:Name="StatusText" Text="Running" FontSize="14" FontWeight="Bold" Foreground="#FFFFFF"/>
 </StackPanel>
 <StackPanel Grid.Column="1" Orientation="Horizontal">
 <Button x:Name="BtnStart" Content="Start" Background="#107C41" BorderBrush="#15944E" Margin="0,0,6,0" Padding="12,4"/>
@@ -158,7 +160,7 @@ function Save-ConfigSettings([int]$timeout, [int]$timerTimeout, [bool]$smartIdle
 <Button x:Name="BtnPreset5m" Content="5 min (Default)" Margin="0,0,6,4" Padding="12,3" Background="#005A9E" BorderBrush="#0078D4"/>
 <Button x:Name="BtnPreset10m" Content="10 min" Margin="0,0,6,4" Padding="10,3"/>
 </WrapPanel>
-<Grid Margin="0,0,0,10">
+<Grid Margin="0,0,0,8">
 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="105"/></Grid.ColumnDefinitions>
 <Slider x:Name="TimeoutSlider" Minimum="30" Maximum="1200" SmallChange="10" LargeChange="60" TickFrequency="60" VerticalAlignment="Center" Margin="0,0,12,0"/>
 <Border Grid.Column="1" Background="#161616" BorderBrush="#383838" BorderThickness="1" CornerRadius="6" Padding="6,3">
@@ -185,7 +187,7 @@ function Save-ConfigSettings([int]$timeout, [int]$timerTimeout, [bool]$smartIdle
 <CheckBox x:Name="ChkNotify" Margin="0,0,0,6" VerticalAlignment="Center">
 <TextBlock Text="Show silent reminder in Notification Center when auto-silenced" FontSize="12" Foreground="#E0E0E0"/>
 </CheckBox>
-<CheckBox x:Name="ChkStartup" Margin="0,0,0,10" VerticalAlignment="Center">
+<CheckBox x:Name="ChkStartup" Margin="0,0,0,8" VerticalAlignment="Center">
 <TextBlock Text="Start automatically when I log into Windows" FontSize="12" Foreground="#E0E0E0"/>
 </CheckBox>
 <Grid>
@@ -274,7 +276,7 @@ $bDark = Br 43 43 43; $bDarkBorder = Br 56 56 56; $bActive = Br 0 90 158; $bActi
 function Update-ServiceStatusUI {
     $r = Get-DaemonStatus
     $statusDot.Fill = if ($r) { $brGreen } else { $brRed }
-    $statusText.Text = if ($r) { "Service Running (Active)" } else { "Service Stopped (Inactive)" }
+    $statusText.Text = if ($r) { "Running" } else { "Stopped" }
     $statusText.Foreground = if ($r) { $brWhite } else { $brGray }
     $btnStart.IsEnabled = -not $r
     $btnStop.IsEnabled  = $r
