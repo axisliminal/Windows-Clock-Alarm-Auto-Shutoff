@@ -23,6 +23,17 @@ function Write-Log([string]$message) {
     } catch {}
 }
 
+# Strict integer parsing and range clamping helper
+function Get-ValidConfigInt($val, [int]$min, [int]$max, [int]$defaultVal) {
+    [int]$parsed = 0
+    if ($null -ne $val -and [int]::TryParse([string]$val, [ref]$parsed)) {
+        if ($parsed -ge $min -and $parsed -le $max) {
+            return $parsed
+        }
+    }
+    return $defaultVal
+}
+
 # Load config
 $timeoutSeconds = 300
 $timerTimeoutSeconds = 60
@@ -32,11 +43,11 @@ $checkIntervalSeconds = 2
 if (Test-Path $configPath) {
     try {
         $cfg = Get-Content $configPath -Raw | ConvertFrom-Json
-        if ($cfg.timeoutSeconds -gt 0) { $timeoutSeconds = $cfg.timeoutSeconds }
-        if ($cfg.timerTimeoutSeconds -gt 0) { $timerTimeoutSeconds = $cfg.timerTimeoutSeconds }
+        $timeoutSeconds = Get-ValidConfigInt $cfg.timeoutSeconds 5 86400 $timeoutSeconds
+        $timerTimeoutSeconds = Get-ValidConfigInt $cfg.timerTimeoutSeconds 5 86400 $timerTimeoutSeconds
         if ($null -ne $cfg.smartIdleGating) { $smartIdleGating = [bool]$cfg.smartIdleGating }
         if ($null -ne $cfg.notifyOnDismiss) { $notifyOnDismiss = [bool]$cfg.notifyOnDismiss }
-        if ($cfg.checkIntervalSeconds -gt 0) { $checkIntervalSeconds = $cfg.checkIntervalSeconds }
+        $checkIntervalSeconds = Get-ValidConfigInt $cfg.checkIntervalSeconds 1 60 $checkIntervalSeconds
         if ($null -ne $cfg.loggingEnabled) { $loggingEnabled = [bool]$cfg.loggingEnabled }
     } catch {
         Write-Log "WARNING: Failed to parse config.json, using defaults: $($_.Exception.Message)"
@@ -83,8 +94,8 @@ if ($Action -match "^[-/]?stop$") {
     Write-Host "Sending stop signal to AlarmAutoDismiss..."
     Set-Content -Path $stopSignalPath -Value "STOP" -ErrorAction SilentlyContinue
     $gracefulExit = $false
-    for ($i = 0; $i -lt 6; $i++) {
-        Start-Sleep -Milliseconds 500
+    for ($i = 0; $i -lt 20; $i++) {
+        Start-Sleep -Milliseconds 150
         try {
             $m = [System.Threading.Mutex]::OpenExisting("Local\AlarmAutoDismiss_PS1_SingleInstance")
             $m.Close()
@@ -395,12 +406,14 @@ while ($true) {
             $currModified = (Get-Item $configPath).LastWriteTimeUtc
             if ($currModified -ne $lastConfigModified) {
                 $cfg = Get-Content $configPath -Raw | ConvertFrom-Json
-                if ($cfg.timeoutSeconds -gt 0 -and $cfg.timeoutSeconds -ne $timeoutSeconds) {
-                    $timeoutSeconds = $cfg.timeoutSeconds
+                $newTimeout = Get-ValidConfigInt $cfg.timeoutSeconds 5 86400 $timeoutSeconds
+                if ($newTimeout -ne $timeoutSeconds) {
+                    $timeoutSeconds = $newTimeout
                     Write-Log "Settings reloaded from config.json: Alarm timeout set to ${timeoutSeconds}s."
                 }
-                if ($cfg.timerTimeoutSeconds -gt 0 -and $cfg.timerTimeoutSeconds -ne $timerTimeoutSeconds) {
-                    $timerTimeoutSeconds = $cfg.timerTimeoutSeconds
+                $newTimerTimeout = Get-ValidConfigInt $cfg.timerTimeoutSeconds 5 86400 $timerTimeoutSeconds
+                if ($newTimerTimeout -ne $timerTimeoutSeconds) {
+                    $timerTimeoutSeconds = $newTimerTimeout
                     Write-Log "Settings reloaded from config.json: Timer timeout set to ${timerTimeoutSeconds}s."
                 }
                 if ($null -ne $cfg.smartIdleGating -and $cfg.smartIdleGating -ne $smartIdleGating) {
@@ -415,9 +428,7 @@ while ($true) {
                     $loggingEnabled = [bool]$cfg.loggingEnabled
                     Write-Log "Settings reloaded from config.json: Logging Enabled set to ${loggingEnabled}."
                 }
-                if ($cfg.checkIntervalSeconds -gt 0) {
-                    $checkIntervalSeconds = $cfg.checkIntervalSeconds
-                }
+                $checkIntervalSeconds = Get-ValidConfigInt $cfg.checkIntervalSeconds 1 60 $checkIntervalSeconds
                 # Concurrency hardening: only advance timestamp marker after successful parse
                 $lastConfigModified = $currModified
             }
@@ -465,7 +476,7 @@ while ($true) {
                             if ($b) {
                                 foreach ($t in $b.GetTextElements()) {
                                     if ($t.Text) {
-                                        if ($t.Text.Contains($testTag)) { $isTestToast = $true }
+                                        if (($isClockAlarm -or ($aumid -and $aumid -like "*PowerShell*")) -and $t.Text.Contains($testTag)) { $isTestToast = $true }
                                         if ($t.Text -match "(?i)\b(timer|minuteur|temporizador|temporizzatore|таймер|タイマー|计时器|計時器|타이머|टाइमर)\b") { $isTimer = $true }
                                     }
                                 }
@@ -603,7 +614,12 @@ while ($true) {
             }
         }
 
-        Start-Sleep -Seconds $checkIntervalSeconds
+        # Responsive sleep sliced in 200ms increments to react immediately to stop signals
+        $sleepTicks = [int](($checkIntervalSeconds * 1000) / 200)
+        for ($s = 0; $s -lt $sleepTicks; $s++) {
+            Start-Sleep -Milliseconds 200
+            if (Test-Path $stopSignalPath) { break }
+        }
     }
 } finally {
     Write-Log "=== PowerShell Daemon stopped gracefully ==="

@@ -83,10 +83,20 @@ function Save-ConfigSettings([int]$timeout, [int]$timerTimeout, [bool]$smartIdle
         loggingEnabled = $logEn
     } | ConvertTo-Json
     $tmp = "$configPath.tmp"
+    $bak = "$configPath.bak"
     try {
         [System.IO.File]::WriteAllText($tmp, $json, [System.Text.Encoding]::UTF8)
-        if (Test-Path $configPath) { [System.IO.File]::Replace($tmp, $configPath, $null) }
-        else { [System.IO.File]::Move($tmp, $configPath) }
+        if (Test-Path $configPath) {
+            try {
+                [System.IO.File]::Replace($tmp, $configPath, $bak)
+                if (Test-Path $bak) { [System.IO.File]::Delete($bak) }
+            } catch {
+                [System.IO.File]::Copy($tmp, $configPath, $true)
+                [System.IO.File]::Delete($tmp)
+            }
+        } else {
+            [System.IO.File]::Move($tmp, $configPath)
+        }
         return $true
     } catch {
         Remove-Item $tmp -Force -ErrorAction SilentlyContinue
@@ -116,6 +126,7 @@ function Save-ConfigSettings([int]$timeout, [int]$timerTimeout, [bool]$smartIdle
 <Setter Property="Background" Value="#D0202020"/><Setter Property="BorderBrush" Value="#353535"/><Setter Property="BorderThickness" Value="1"/><Setter Property="CornerRadius" Value="8"/><Setter Property="Padding" Value="12"/><Setter Property="Margin" Value="0,0,0,10"/>
 </Style>
 </Window.Resources>
+<Grid>
 <ScrollViewer VerticalScrollBarVisibility="Auto">
 <StackPanel Margin="18">
 <Grid Margin="0,0,0,12">
@@ -125,7 +136,7 @@ function Save-ConfigSettings([int]$timeout, [int]$timerTimeout, [bool]$smartIdle
 <TextBlock Text="Clock Auto-Dismiss Settings" FontSize="12" Foreground="#9E9E9E" Margin="0,2,0,0"/>
 </StackPanel>
 <Border Grid.Column="1" Background="#242830" BorderBrush="#303848" BorderThickness="1" CornerRadius="12" Padding="10,3" VerticalAlignment="Center">
-<TextBlock Text="v1.6.4 | Pure Memory" FontSize="11" Foreground="#4DA3FF" FontWeight="SemiBold"/>
+<TextBlock Text="v1.6.6 | Hardened UI" FontSize="11" Foreground="#4DA3FF" FontWeight="SemiBold"/>
 </Border>
 </Grid>
 <Border Style="{StaticResource Card}">
@@ -214,6 +225,16 @@ function Save-ConfigSettings([int]$timeout, [int]$timerTimeout, [bool]$smartIdle
 </Border>
 </StackPanel>
 </ScrollViewer>
+<Grid x:Name="LoadingOverlay" Visibility="Collapsed" Background="#CC101010">
+<Border Background="#202020" BorderBrush="#383838" BorderThickness="1" CornerRadius="10" Padding="24,20" Width="300" HorizontalAlignment="Center" VerticalAlignment="Center">
+<StackPanel HorizontalAlignment="Center">
+<TextBlock x:Name="LoadingTitle" Text="Stopping Service..." FontSize="15" FontWeight="SemiBold" Foreground="#FFFFFF" HorizontalAlignment="Center"/>
+<ProgressBar x:Name="LoadingProgress" IsIndeterminate="True" Height="4" Margin="0,14,0,10" Foreground="#D13438" Background="#2B2B2B" BorderThickness="0"/>
+<TextBlock x:Name="LoadingDetail" Text="Waiting for background daemon to exit..." FontSize="12" Foreground="#9E9E9E" HorizontalAlignment="Center"/>
+</StackPanel>
+</Border>
+</Grid>
+</Grid>
 </Window>
 '@
 
@@ -231,7 +252,7 @@ $window.Add_SourceInitialized({
     } catch {}
 })
 
-foreach ($n in @("StatusDot","StatusText","BtnStart","BtnStop","BtnRestart","BtnPreset1m","BtnPreset2m","BtnPreset3m","BtnPreset5m","BtnPreset10m","TimeoutSlider","TimeoutDisplay","BtnTimer30s","BtnTimer1m","BtnTimer2m","BtnTimer5m","TimerSlider","TimerDisplay","ChkSmartIdle","ChkNotify","ChkStartup","BtnSave","SaveFeedback","BtnTestAlarm","TestStatusText","TestProgressBar","LogViewer","BtnRefreshLog","BtnClearLog")) { Set-Variable -Name $n -Value $window.FindName($n) }
+foreach ($n in @("StatusDot","StatusText","BtnStart","BtnStop","BtnRestart","BtnPreset1m","BtnPreset2m","BtnPreset3m","BtnPreset5m","BtnPreset10m","TimeoutSlider","TimeoutDisplay","BtnTimer30s","BtnTimer1m","BtnTimer2m","BtnTimer5m","TimerSlider","TimerDisplay","ChkSmartIdle","ChkNotify","ChkStartup","BtnSave","SaveFeedback","BtnTestAlarm","TestStatusText","TestProgressBar","LogViewer","BtnRefreshLog","BtnClearLog","LoadingOverlay","LoadingTitle","LoadingProgress","LoadingDetail")) { Set-Variable -Name $n -Value $window.FindName($n) }
 
 $cfgData = Load-ConfigSettings
 $timeoutSlider.Value = $cfgData.timeout
@@ -307,9 +328,119 @@ function Set-TimerPreset([int]$sec, $btn) {
 $timeoutSlider.Add_ValueChanged({ $timeoutDisplay.Text = Format-SecDisplay $timeoutSlider.Value })
 $timerSlider.Add_ValueChanged({ $timerDisplay.Text = Format-SecDisplay $timerSlider.Value })
 
-$btnStart.Add_Click({ Start-DaemonService; Start-Sleep -Milliseconds 600; Update-ServiceStatusUI; Refresh-LogViewer })
-$btnStop.Add_Click({ Stop-DaemonService; Start-Sleep -Milliseconds 600; Update-ServiceStatusUI; Refresh-LogViewer })
-$btnRestart.Add_Click({ Stop-DaemonService; Start-Sleep -Milliseconds 400; Start-DaemonService; Start-Sleep -Milliseconds 600; Update-ServiceStatusUI; Refresh-LogViewer })
+$script:asyncTimer = $null
+
+function Invoke-AsyncDaemonAction([string]$actionTitle, [string]$actionType) {
+    $btnStart.IsEnabled = $false
+    $btnStop.IsEnabled  = $false
+    $btnRestart.IsEnabled = $false
+
+    $loadingTitle.Text = $actionTitle
+    $loadingDetail.Text = if ($actionType -eq "stop") { "Sending stop signal..." } elseif ($actionType -eq "restart") { "Stopping active daemon..." } else { "Starting daemon..." }
+    $loadingProgress.Foreground = if ($actionType -eq "stop") { $brRed } elseif ($actionType -eq "start") { $brGreen } else { $bActive }
+    $loadingOverlay.Visibility = [System.Windows.Visibility]::Visible
+
+    if ($actionType -eq "start") {
+        Start-DaemonService
+        $t = [System.Windows.Threading.DispatcherTimer]::new()
+        $t.Interval = [TimeSpan]::FromMilliseconds(500)
+        $t.Add_Tick({
+            $t.Stop()
+            $loadingOverlay.Visibility = [System.Windows.Visibility]::Collapsed
+            Update-ServiceStatusUI
+            Refresh-LogViewer
+        })
+        $t.Start()
+        return
+    }
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $psExe
+    $psi.Arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$daemonScript`" -Action stop"
+    $psi.CreateNoWindow = $true
+    $psi.UseShellExecute = $false
+    try {
+        $proc = [System.Diagnostics.Process]::Start($psi)
+    } catch {
+        $loadingTitle.Text = "Execution Error"
+        $loadingDetail.Text = "Failed to launch process: $($_.Exception.Message)"
+        $loadingProgress.Foreground = $brRed
+        $t = [System.Windows.Threading.DispatcherTimer]::new()
+        $t.Interval = [TimeSpan]::FromSeconds(2)
+        $t.Add_Tick({ $t.Stop(); $loadingOverlay.Visibility = [System.Windows.Visibility]::Collapsed; Update-ServiceStatusUI; Refresh-LogViewer })
+        $t.Start()
+        return
+    }
+
+    $step = 0
+    $script:asyncTimer = [System.Windows.Threading.DispatcherTimer]::new()
+    $script:asyncTimer.Interval = [TimeSpan]::FromMilliseconds(150)
+    $script:asyncTimer.Add_Tick({
+        $step++
+        if ($step -gt 35) {
+            # 5-second hard ceiling exceeded: safely terminate and reset UI
+            $script:asyncTimer.Stop()
+            try { if ($proc -and -not $proc.HasExited) { $proc.Kill() } } catch {}
+            if ($proc) { $proc.Dispose() }
+            $loadingTitle.Text = "Operation Timed Out"
+            $loadingDetail.Text = "Process exceeded 5s ceiling; UI safely recovered."
+            $loadingProgress.Foreground = $brRed
+            $postTimer = [System.Windows.Threading.DispatcherTimer]::new()
+            $postTimer.Interval = [TimeSpan]::FromSeconds(2)
+            $postTimer.Add_Tick({
+                $postTimer.Stop()
+                $loadingOverlay.Visibility = [System.Windows.Visibility]::Collapsed
+                Update-ServiceStatusUI
+                Refresh-LogViewer
+            })
+            $postTimer.Start()
+            return
+        }
+
+        if ($proc.HasExited) {
+            $script:asyncTimer.Stop()
+            $proc.Dispose()
+
+            if ($actionType -eq "restart") {
+                $loadingTitle.Text = "Restarting Service..."
+                $loadingDetail.Text = "Launching background daemon..."
+                $loadingProgress.Foreground = $brGreen
+                Start-DaemonService
+                $postTimer = [System.Windows.Threading.DispatcherTimer]::new()
+                $postTimer.Interval = [TimeSpan]::FromMilliseconds(600)
+                $postTimer.Add_Tick({
+                    $postTimer.Stop()
+                    $loadingOverlay.Visibility = [System.Windows.Visibility]::Collapsed
+                    Update-ServiceStatusUI
+                    Refresh-LogViewer
+                })
+                $postTimer.Start()
+            } else {
+                $loadingDetail.Text = "Service stopped successfully."
+                $postTimer = [System.Windows.Threading.DispatcherTimer]::new()
+                $postTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+                $postTimer.Add_Tick({
+                    $postTimer.Stop()
+                    $loadingOverlay.Visibility = [System.Windows.Visibility]::Collapsed
+                    Update-ServiceStatusUI
+                    Refresh-LogViewer
+                })
+                $postTimer.Start()
+            }
+        } else {
+            if ($step -gt 6 -and $step -le 14) {
+                $loadingDetail.Text = "Waiting for daemon shutdown..."
+            } elseif ($step -gt 14) {
+                $loadingDetail.Text = "Finalizing process cleanup..."
+            }
+        }
+    })
+    $script:asyncTimer.Start()
+}
+
+$btnStart.Add_Click({ Invoke-AsyncDaemonAction "Starting Service..." "start" })
+$btnStop.Add_Click({ Invoke-AsyncDaemonAction "Stopping Service..." "stop" })
+$btnRestart.Add_Click({ Invoke-AsyncDaemonAction "Restarting Service..." "restart" })
 
 $btnSave.Add_Click({
     $ok = Save-ConfigSettings ([int]$timeoutSlider.Value) ([int]$timerSlider.Value) ([bool]$chkSmartIdle.IsChecked) ([bool]$chkNotify.IsChecked)
@@ -410,6 +541,7 @@ $btnTestAlarm.Add_Click({
 $window.Add_Closing({
     if ($script:soundPlayer) { try { $script:soundPlayer.Stop() } catch {} }
     if ($script:testTimer) { try { $script:testTimer.Stop() } catch {} }
+    if ($script:asyncTimer) { try { $script:asyncTimer.Stop() } catch {} }
     if ($pollTimer) { try { $pollTimer.Stop() } catch {} }
 })
 

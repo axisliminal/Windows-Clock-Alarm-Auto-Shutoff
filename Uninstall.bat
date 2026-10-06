@@ -28,7 +28,8 @@ set "TARGETAPP=%LOCALAPPDATA%\AlarmAutoDismiss\"
 if /i "%CURRDIR%"=="%TARGETAPP%" (
     echo Cleaning up installation files...
     "%PS_EXE%" -NoProfile -Command "Start-Sleep -Seconds 2"
-    start "" "%SystemRoot%\System32\cmd.exe" /c rd /s /q "%LOCALAPPDATA%\AlarmAutoDismiss"
+    cd /d "%TEMP%"
+    start "" /d "%TEMP%" "%SystemRoot%\System32\cmd.exe" /c rd /s /q "%LOCALAPPDATA%\AlarmAutoDismiss"
     exit
 )
 goto :done
