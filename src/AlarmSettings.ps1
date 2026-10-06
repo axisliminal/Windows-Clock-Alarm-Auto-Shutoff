@@ -136,7 +136,7 @@ function Save-ConfigSettings([int]$timeout, [int]$timerTimeout, [bool]$smartIdle
 <TextBlock Text="Clock Auto-Dismiss Settings" FontSize="12" Foreground="#9E9E9E" Margin="0,2,0,0"/>
 </StackPanel>
 <Border Grid.Column="1" Background="#242830" BorderBrush="#303848" BorderThickness="1" CornerRadius="12" Padding="10,3" VerticalAlignment="Center">
-<TextBlock Text="v1.6.6 | Hardened UI" FontSize="11" Foreground="#4DA3FF" FontWeight="SemiBold"/>
+<TextBlock Text="v1.6.7 | Resilient UI" FontSize="11" Foreground="#4DA3FF" FontWeight="SemiBold"/>
 </Border>
 </Grid>
 <Border Style="{StaticResource Card}">
@@ -345,7 +345,8 @@ function Invoke-AsyncDaemonAction([string]$actionTitle, [string]$actionType) {
         $t = [System.Windows.Threading.DispatcherTimer]::new()
         $t.Interval = [TimeSpan]::FromMilliseconds(500)
         $t.Add_Tick({
-            $t.Stop()
+            param($s, $e)
+            $s.Stop()
             $loadingOverlay.Visibility = [System.Windows.Visibility]::Collapsed
             Update-ServiceStatusUI
             Refresh-LogViewer
@@ -367,19 +368,35 @@ function Invoke-AsyncDaemonAction([string]$actionTitle, [string]$actionType) {
         $loadingProgress.Foreground = $brRed
         $t = [System.Windows.Threading.DispatcherTimer]::new()
         $t.Interval = [TimeSpan]::FromSeconds(2)
-        $t.Add_Tick({ $t.Stop(); $loadingOverlay.Visibility = [System.Windows.Visibility]::Collapsed; Update-ServiceStatusUI; Refresh-LogViewer })
+        $t.Add_Tick({
+            param($s, $e)
+            $s.Stop()
+            $loadingOverlay.Visibility = [System.Windows.Visibility]::Collapsed
+            Update-ServiceStatusUI
+            Refresh-LogViewer
+        })
         $t.Start()
         return
     }
 
-    $step = 0
     $script:asyncTimer = [System.Windows.Threading.DispatcherTimer]::new()
     $script:asyncTimer.Interval = [TimeSpan]::FromMilliseconds(150)
+    $script:asyncTimer.Tag = @{
+        Proc       = $proc
+        Step       = 0
+        ActionType = $actionType
+    }
     $script:asyncTimer.Add_Tick({
-        $step++
+        param($timer, $e)
+        $state = $timer.Tag
+        $state.Step++
+        $step = $state.Step
+        $proc = $state.Proc
+        $act = $state.ActionType
+
         if ($step -gt 35) {
             # 5-second hard ceiling exceeded: safely terminate and reset UI
-            $script:asyncTimer.Stop()
+            $timer.Stop()
             try { if ($proc -and -not $proc.HasExited) { $proc.Kill() } } catch {}
             if ($proc) { $proc.Dispose() }
             $loadingTitle.Text = "Operation Timed Out"
@@ -388,7 +405,8 @@ function Invoke-AsyncDaemonAction([string]$actionTitle, [string]$actionType) {
             $postTimer = [System.Windows.Threading.DispatcherTimer]::new()
             $postTimer.Interval = [TimeSpan]::FromSeconds(2)
             $postTimer.Add_Tick({
-                $postTimer.Stop()
+                param($ps, $pe)
+                $ps.Stop()
                 $loadingOverlay.Visibility = [System.Windows.Visibility]::Collapsed
                 Update-ServiceStatusUI
                 Refresh-LogViewer
@@ -398,10 +416,10 @@ function Invoke-AsyncDaemonAction([string]$actionTitle, [string]$actionType) {
         }
 
         if ($proc.HasExited) {
-            $script:asyncTimer.Stop()
+            $timer.Stop()
             $proc.Dispose()
 
-            if ($actionType -eq "restart") {
+            if ($act -eq "restart") {
                 $loadingTitle.Text = "Restarting Service..."
                 $loadingDetail.Text = "Launching background daemon..."
                 $loadingProgress.Foreground = $brGreen
@@ -409,7 +427,8 @@ function Invoke-AsyncDaemonAction([string]$actionTitle, [string]$actionType) {
                 $postTimer = [System.Windows.Threading.DispatcherTimer]::new()
                 $postTimer.Interval = [TimeSpan]::FromMilliseconds(600)
                 $postTimer.Add_Tick({
-                    $postTimer.Stop()
+                    param($ps, $pe)
+                    $ps.Stop()
                     $loadingOverlay.Visibility = [System.Windows.Visibility]::Collapsed
                     Update-ServiceStatusUI
                     Refresh-LogViewer
@@ -420,7 +439,8 @@ function Invoke-AsyncDaemonAction([string]$actionTitle, [string]$actionType) {
                 $postTimer = [System.Windows.Threading.DispatcherTimer]::new()
                 $postTimer.Interval = [TimeSpan]::FromMilliseconds(250)
                 $postTimer.Add_Tick({
-                    $postTimer.Stop()
+                    param($ps, $pe)
+                    $ps.Stop()
                     $loadingOverlay.Visibility = [System.Windows.Visibility]::Collapsed
                     Update-ServiceStatusUI
                     Refresh-LogViewer
@@ -448,7 +468,7 @@ $btnSave.Add_Click({
     if ($ok) { $saveFeedback.Text = "[OK] Settings saved! Dynamically reloaded."; $saveFeedback.Foreground = $brGreen }
     else { $saveFeedback.Text = "[!] Error saving config.json."; $saveFeedback.Foreground = $brRed }
     $t = [System.Windows.Threading.DispatcherTimer]::new(); $t.Interval = [TimeSpan]::FromSeconds(3)
-    $t.Add_Tick({ $saveFeedback.Text = ""; $t.Stop() }); $t.Start(); Refresh-LogViewer
+    $t.Add_Tick({ param($s, $e); $saveFeedback.Text = ""; $s.Stop() }); $t.Start(); Refresh-LogViewer
 })
 
 $script:testTimer = $null
@@ -526,10 +546,11 @@ $btnTestAlarm.Add_Click({
             $ht = [System.Windows.Threading.DispatcherTimer]::new()
             $ht.Interval = [TimeSpan]::FromSeconds(3)
             $ht.Add_Tick({
+                param($s, $e)
                 $testProgressBar.Visibility = [System.Windows.Visibility]::Collapsed
                 $testStatusText.Text = "Ready"
                 $testStatusText.Foreground = $brGray
-                $ht.Stop()
+                $s.Stop()
             })
             $ht.Start()
             Refresh-LogViewer
