@@ -113,13 +113,13 @@ if ($Action -match "^[-/]?stop$") {
             break
         }
     }
-    # Also terminate any running powershell daemon process targeting this script in current session
+    # Also terminate any running powershell daemon process targeting this script in current session (SEC-04)
     $currSession = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
     $daemons = Get-CimInstance Win32_Process | Where-Object { 
         $_.Name -match '^powershell\.exe$' -and
         $_.SessionId -eq $currSession -and
-        $_.CommandLine -like "*AlarmAutoDismiss.ps1*" -and 
-        $_.CommandLine -notlike "*-Action*" -and
+        $_.CommandLine -match '(?i)powershell(\.exe)?.*-File\s+["'']?.*\\AlarmAutoDismiss\.ps1["'']?\s*$' -and 
+        $_.CommandLine -notmatch '(?i)-Action\s+' -and
         $_.ProcessId -ne $PID 
     }
     if ($daemons) {
@@ -256,8 +256,20 @@ try {
     $mutexSec.AddAccessRule($accessRule)
     $mutex = New-Object System.Threading.Mutex($true, "Local\AlarmAutoDismiss_PS1_SingleInstance", [ref]$mutexCreated, $mutexSec)
 } catch [System.UnauthorizedAccessException] {
-    Write-Log "SECURITY ALERT: Mutex exists with an incompatible DACL. Possible squatting attack."
-    exit 1
+    # Cross-verify against active process table to confirm genuine daemon vs squatting (SEC-03)
+    $currSession = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+    $liveDaemon = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.Name -match '^powershell\.exe$' -and $_.SessionId -eq $currSession -and $_.ProcessId -ne $PID -and
+        $_.CommandLine -match '(?i)powershell(\.exe)?.*-File\s+["'']?.*\\AlarmAutoDismiss\.ps1["'']?\s*$' -and
+        $_.CommandLine -notmatch '(?i)-Action\s+'
+    }
+    if ($liveDaemon) {
+        Write-Log "SECURITY NOTICE: Mutex exists with DACL restriction from active daemon (PID: $($liveDaemon[0].ProcessId)). Exiting."
+        exit 0
+    } else {
+        Write-Log "SECURITY ALERT: Mutex exists with an incompatible DACL and NO active daemon process found in session $currSession (Definite mutex squatting attack). Exiting with error."
+        exit 1
+    }
 } catch {
     Write-Log "ERROR creating single-instance mutex with DACL: $($_.Exception.Message)"
     exit 1
@@ -265,8 +277,20 @@ try {
 
 if (-not $mutexCreated) {
     if ($mutex) { $mutex.Close() }
-    Write-Log "Another daemon instance is already running. Exiting silently."
-    exit 0
+    # Cross-verify against active process table to confirm genuine daemon vs orphaned/squatted mutex (SEC-03)
+    $currSession = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+    $liveDaemon = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.Name -match '^powershell\.exe$' -and $_.SessionId -eq $currSession -and $_.ProcessId -ne $PID -and
+        $_.CommandLine -match '(?i)powershell(\.exe)?.*-File\s+["'']?.*\\AlarmAutoDismiss\.ps1["'']?\s*$' -and
+        $_.CommandLine -notmatch '(?i)-Action\s+'
+    }
+    if ($liveDaemon) {
+        Write-Log "Another daemon instance is already running (PID: $($liveDaemon[0].ProcessId)). Exiting silently."
+        exit 0
+    } else {
+        Write-Log "SECURITY WARNING: Mutex collision detected but NO active daemon process found in session $currSession (Possible mutex squatting or orphaned handle). Exiting."
+        exit 1
+    }
 }
 
 try {
@@ -596,7 +620,8 @@ while ($true) {
                     $resetAny = $true
                 }
             }
-            if ($resetAny) {
+            if ($resetAny -and ([DateTime]::UtcNow - $lastMemoryTrim).TotalSeconds -ge 15) {
+                $lastMemoryTrim = [DateTime]::UtcNow
                 try {
                     [System.GC]::Collect()
                     [System.GC]::WaitForPendingFinalizers()

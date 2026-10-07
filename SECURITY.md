@@ -40,3 +40,20 @@ When reporting a vulnerability, please include:
 - **Initial Acknowledgment:** Within 48 hours of receipt.
 - **Assessment & Triage:** Within 5 business days.
 - **Fix & Advisory Release:** Coordinated disclosure once a patch is tested and verified.
+
+---
+
+## Enterprise WDAC & Code-Signing Guidance
+
+In enterprise environments enforcing **Windows Defender Application Control (WDAC)** or **Smart App Control Enforced Mode (`2`)**, unsigned PowerShell scripts automatically drop to **ConstrainedLanguage Mode (CLM)**. In CLM, dynamic code generation (`System.Reflection.Emit`) and certain WinRT interop types are restricted by Windows kernel Code Integrity policy.
+
+To deploy in enterprise CLM/WDAC environments with FullLanguage capabilities:
+1. Obtain an Authenticode Code-Signing Certificate from your enterprise Public Key Infrastructure (PKI) or Internal Root CA.
+2. Sign all PowerShell scripts in `src/` prior to rollout:
+   ```powershell
+   $cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert | Select-Object -First 1
+   Set-AuthenticodeSignature -FilePath "src\AlarmAutoDismiss.ps1" -Certificate $cert -TimestampServer "http://timestamp.digicert.com"
+   Set-AuthenticodeSignature -FilePath "src\AlarmSettings.ps1" -Certificate $cert -TimestampServer "http://timestamp.digicert.com"
+   ```
+3. Deploy the enterprise root CA certificate to target machines' `Trusted Root Certification Authorities` and `Trusted Publishers` stores via Group Policy (GPO) or Microsoft Intune.
+
