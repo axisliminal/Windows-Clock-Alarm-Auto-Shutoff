@@ -152,7 +152,7 @@ function Save-ConfigSettings([int]$timeout, [int]$timerTimeout, [bool]$smartIdle
 <TextBlock Text="Clock Auto-Dismiss Settings" FontSize="12" Foreground="#9E9E9E" Margin="0,2,0,0"/>
 </StackPanel>
 <Border Grid.Column="1" Background="#242830" BorderBrush="#303848" BorderThickness="1" CornerRadius="12" Padding="10,3" VerticalAlignment="Center">
-<TextBlock Text="v1.6.9 | Hardened Core" FontSize="11" Foreground="#4DA3FF" FontWeight="SemiBold"/>
+<TextBlock Text="v1.6.10 | Telemetry Enhanced" FontSize="11" Foreground="#4DA3FF" FontWeight="SemiBold"/>
 </Border>
 </Grid>
 <Border Style="{StaticResource Card}">

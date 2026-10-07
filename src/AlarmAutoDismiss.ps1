@@ -141,13 +141,81 @@ if ($Action -match "^[-/]?status$") {
     try {
         $m = [System.Threading.Mutex]::OpenExisting("Local\AlarmAutoDismiss_PS1_SingleInstance")
         $m.Close()
-        Write-Host "AlarmAutoDismiss Status: RUNNING (Active)"
-        exit 0
     } catch {
-        Write-Host "AlarmAutoDismiss Status: STOPPED (Not running)"
+        Write-Host "AlarmAutoDismiss Status: STOPPED (Not running)" -ForegroundColor Red
         exit 1
     }
+
+    # Query live daemon process in current session
+    $currSession = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+    $daemonProc = Get-CimInstance Win32_Process | Where-Object { 
+        $_.Name -match '^powershell\.exe$' -and
+        $_.SessionId -eq $currSession -and
+        $_.CommandLine -match '(?i)powershell(\.exe)?.*-File\s+["'']?.*\\AlarmAutoDismiss\.ps1["'']?\s*$' -and 
+        $_.CommandLine -notmatch '(?i)-Action\s+' -and
+        $_.ProcessId -ne $PID 
+    } | Select-Object -First 1
+
+    Write-Host "==================================================" -ForegroundColor Cyan
+    Write-Host "  AlarmAutoDismiss - Diagnostic Telemetry Status" -ForegroundColor Cyan
+    Write-Host "==================================================" -ForegroundColor Cyan
+    Write-Host "  Status:          RUNNING (Active)" -ForegroundColor Green
+
+    if ($daemonProc) {
+        $proc = Get-Process -Id $daemonProc.ProcessId -ErrorAction SilentlyContinue
+        $wsMB = if ($proc) { [math]::Round($proc.WorkingSet64 / 1MB, 2) } else { "N/A" }
+        $threads = if ($proc) { $proc.Threads.Count } else { "N/A" }
+        $handles = if ($proc) { $proc.HandleCount } else { "N/A" }
+        $uptimeStr = "N/A"
+        if ($proc -and $proc.StartTime) {
+            $span = (Get-Date) - $proc.StartTime
+            if ($span.TotalDays -ge 1) {
+                $uptimeStr = "{0}d {1}h {2}m" -f [int]$span.TotalDays, $span.Hours, $span.Minutes
+            } elseif ($span.TotalHours -ge 1) {
+                $uptimeStr = "{0}h {1}m {2}s" -f $span.Hours, $span.Minutes, $span.Seconds
+            } else {
+                $uptimeStr = "{0}m {1}s" -f $span.Minutes, $span.Seconds
+            }
+        }
+
+        Write-Host "  Process ID:      $($daemonProc.ProcessId)" -ForegroundColor White
+        Write-Host "  Session ID:      $currSession" -ForegroundColor White
+        Write-Host "  Uptime:          $uptimeStr" -ForegroundColor White
+        Write-Host "  Working Set:     $wsMB MB RAM (EcoQoS Active)" -ForegroundColor White
+        Write-Host "  Threads/Handles: $threads threads / $handles handles" -ForegroundColor DarkGray
+    } else {
+        Write-Host "  Mutex:           Local\AlarmAutoDismiss_PS1_SingleInstance acquired." -ForegroundColor Yellow
+    }
+
+    $targetLogPath = $logPath
+    if ($daemonProc -and $daemonProc.CommandLine -match '(?i)-File\s+["'']?([^"'']+\\AlarmAutoDismiss\.ps1)["'']?') {
+        $daemonFile = $matches[1]
+        $dScriptDir = Split-Path -Parent $daemonFile
+        $dBaseDir = if ((Split-Path -Leaf $dScriptDir) -eq 'src') { Split-Path -Parent $dScriptDir } else { $dScriptDir }
+        $candidateLog = Join-Path $dBaseDir "alarm_history.log"
+        if (Test-Path $candidateLog) { $targetLogPath = $candidateLog }
+    }
+
+    Write-Host "  Thresholds:      Alarms: ${timeoutSeconds}s | Timers: ${timerTimeoutSeconds}s" -ForegroundColor DarkGray
+    Write-Host "  Smart Idle:      $(if ($smartIdleGating) { 'Enabled' } else { 'Disabled' }) | Silent Reminder: $(if ($notifyOnDismiss) { 'Enabled' } else { 'Disabled' })" -ForegroundColor DarkGray
+    Write-Host "--------------------------------------------------" -ForegroundColor DarkGray
+    Write-Host "  Recent Activity (alarm_history.log):" -ForegroundColor Gray
+    if (Test-Path $targetLogPath) {
+        $recentLogs = Get-Content -Path $targetLogPath -Tail 3 -Encoding UTF8 -ErrorAction SilentlyContinue
+        if ($recentLogs) {
+            foreach ($line in $recentLogs) {
+                Write-Host "    $line" -ForegroundColor DarkGray
+            }
+        } else {
+            Write-Host "    (Log file is empty)" -ForegroundColor DarkGray
+        }
+    } else {
+        Write-Host "    (No log file found)" -ForegroundColor DarkGray
+    }
+    Write-Host "==================================================" -ForegroundColor Cyan
+    exit 0
 }
+
 
 # --- Action: -test ---
 if ($Action -match "^[-/]?test$") {
@@ -501,6 +569,7 @@ while ($true) {
                     # Strict Filter: Only Windows Clock alarms/timers or synthetic test toasts
                     $isClockAlarm = $false
                     $isTestToast = $false
+                    $aumid = $null
 
                     try {
                         if ($n.AppInfo) {
@@ -511,6 +580,11 @@ while ($true) {
                             }
                         }
                     } catch {}
+
+                    # Fast-path: immediately skip unrelated notifications without inspecting Visual bindings
+                    if (-not $isClockAlarm -and (-not $aumid -or $aumid -notlike "*PowerShell*")) {
+                        continue
+                    }
 
                     # Inspect binding for test tag and timer discrimination
                     $isTimer = $false
@@ -639,6 +713,7 @@ while ($true) {
                 [System.GC]::Collect()
                 [System.GC]::WaitForPendingFinalizers()
                 Trim-WorkingSet
+                $lastMemoryTrim = [DateTime]::UtcNow
                 $curMb = [math]::Round((Get-Process -Id $PID).WorkingSet64 / 1MB, 2)
                 Write-Log "Steady-state memory compaction applied. Active working set: ${curMb} MB."
             } catch {}
@@ -646,13 +721,15 @@ while ($true) {
 
         # Periodic memory compaction (every 10 minutes, or when idle working set exceeds 25MB)
         $timeSinceTrim = [DateTime]::UtcNow - $lastMemoryTrim
-        $needTrim = ($timeSinceTrim.TotalMinutes -ge 10) -or ($firstSeenMap.Count -eq 0 -and $timeSinceTrim.TotalSeconds -ge 60 -and [System.Diagnostics.Process]::GetCurrentProcess().WorkingSet64 -gt 25MB)
+        $needTrim = ($timeSinceTrim.TotalMinutes -ge 10) -or ($firstSeenMap.Count -eq 0 -and $timeSinceTrim.TotalSeconds -ge 30 -and [System.Diagnostics.Process]::GetCurrentProcess().WorkingSet64 -gt 25MB)
         if ($needTrim) {
             $lastMemoryTrim = [DateTime]::UtcNow
             try {
                 [System.GC]::Collect()
                 [System.GC]::WaitForPendingFinalizers()
                 Trim-WorkingSet
+                $curMb = [math]::Round((Get-Process -Id $PID).WorkingSet64 / 1MB, 2)
+                Write-Log "Periodic memory compaction applied. Active working set: ${curMb} MB."
             } catch {}
 
             # In-loop periodic log rotation (>512 KB to tail 500 lines)
