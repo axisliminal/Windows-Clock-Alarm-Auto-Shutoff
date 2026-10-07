@@ -10,7 +10,7 @@ if (-not ([System.Management.Automation.PSTypeName]'Win32.Dwm').Type) {
 }
 
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } elseif ($MyInvocation.MyCommand.Path) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { (Get-Location).Path }
-$baseDir = if (Test-Path (Join-Path (Split-Path -Parent $scriptDir) "config.json")) { Split-Path -Parent $scriptDir } else { $scriptDir }
+$baseDir = if ((Split-Path -Leaf $scriptDir) -eq 'src') { Split-Path -Parent $scriptDir } else { $scriptDir }
 $daemonScript = if (Test-Path (Join-Path $scriptDir "AlarmAutoDismiss.ps1")) { Join-Path $scriptDir "AlarmAutoDismiss.ps1" } else { Join-Path $baseDir "src\AlarmAutoDismiss.ps1" }
 $configPath = Join-Path $baseDir "config.json"
 $logPath = Join-Path $baseDir "alarm_history.log"
@@ -51,15 +51,31 @@ function Set-StartupEnabled([bool]$enable) {
     }
 }
 
+function Get-ValidConfigInt($val, [int]$min, [int]$max, [int]$defaultVal) {
+    [int]$parsed = 0
+    if ($null -ne $val -and [int]::TryParse([string]$val, [ref]$parsed)) {
+        if ($parsed -ge $min -and $parsed -le $max) { return $parsed }
+    }
+    return $defaultVal
+}
+
+function Get-ValidConfigBool($val, [bool]$defaultVal) {
+    if ($null -eq $val) { return $defaultVal }
+    $s = "$val".Trim().ToLower()
+    if ($s -eq 'true' -or $s -eq '1') { return $true }
+    if ($s -eq 'false' -or $s -eq '0') { return $false }
+    return $defaultVal
+}
+
 function Load-ConfigSettings {
     $c = @{ timeout = 300; timerTimeout = 60; smartIdle = $false; notify = $true }
     if (Test-Path $configPath) {
         try {
             $cfg = Get-Content $configPath -Raw | ConvertFrom-Json
-            if ($cfg.timeoutSeconds -gt 0) { $c.timeout = [int]$cfg.timeoutSeconds }
-            if ($cfg.timerTimeoutSeconds -gt 0) { $c.timerTimeout = [int]$cfg.timerTimeoutSeconds }
-            if ($null -ne $cfg.smartIdleGating) { $c.smartIdle = [bool]$cfg.smartIdleGating }
-            if ($null -ne $cfg.notifyOnDismiss) { $c.notify = [bool]$cfg.notifyOnDismiss }
+            $c.timeout = Get-ValidConfigInt $cfg.timeoutSeconds 5 86400 $c.timeout
+            $c.timerTimeout = Get-ValidConfigInt $cfg.timerTimeoutSeconds 5 86400 $c.timerTimeout
+            $c.smartIdle = Get-ValidConfigBool $cfg.smartIdleGating $c.smartIdle
+            $c.notify = Get-ValidConfigBool $cfg.notifyOnDismiss $c.notify
         } catch {}
     }
     return $c
@@ -70,8 +86,8 @@ function Save-ConfigSettings([int]$timeout, [int]$timerTimeout, [bool]$smartIdle
     if (Test-Path $configPath) {
         try {
             $ex = Get-Content $configPath -Raw | ConvertFrom-Json
-            if ($ex.checkIntervalSeconds -gt 0) { $cInt = [int]$ex.checkIntervalSeconds }
-            if ($null -ne $ex.loggingEnabled) { $logEn = [bool]$ex.loggingEnabled }
+            $cInt = Get-ValidConfigInt $ex.checkIntervalSeconds 1 60 2
+            $logEn = Get-ValidConfigBool $ex.loggingEnabled $true
         } catch {}
     }
     $json = @{
@@ -136,7 +152,7 @@ function Save-ConfigSettings([int]$timeout, [int]$timerTimeout, [bool]$smartIdle
 <TextBlock Text="Clock Auto-Dismiss Settings" FontSize="12" Foreground="#9E9E9E" Margin="0,2,0,0"/>
 </StackPanel>
 <Border Grid.Column="1" Background="#242830" BorderBrush="#303848" BorderThickness="1" CornerRadius="12" Padding="10,3" VerticalAlignment="Center">
-<TextBlock Text="v1.6.7 | Resilient UI" FontSize="11" Foreground="#4DA3FF" FontWeight="SemiBold"/>
+<TextBlock Text="v1.6.8 | Hardened Core" FontSize="11" Foreground="#4DA3FF" FontWeight="SemiBold"/>
 </Border>
 </Grid>
 <Border Style="{StaticResource Card}">
@@ -254,7 +270,12 @@ $window.Add_SourceInitialized({
 
 foreach ($n in @("StatusDot","StatusText","BtnStart","BtnStop","BtnRestart","BtnPreset1m","BtnPreset2m","BtnPreset3m","BtnPreset5m","BtnPreset10m","TimeoutSlider","TimeoutDisplay","BtnTimer30s","BtnTimer1m","BtnTimer2m","BtnTimer5m","TimerSlider","TimerDisplay","ChkSmartIdle","ChkNotify","ChkStartup","BtnSave","SaveFeedback","BtnTestAlarm","TestStatusText","TestProgressBar","LogViewer","BtnRefreshLog","BtnClearLog","LoadingOverlay","LoadingTitle","LoadingProgress","LoadingDetail")) { Set-Variable -Name $n -Value $window.FindName($n) }
 
+$script:transientTimers = [System.Collections.Generic.List[System.Windows.Threading.DispatcherTimer]]::new()
+function New-TransientTimer { $t = [System.Windows.Threading.DispatcherTimer]::new(); $script:transientTimers.Add($t); return $t }
+
 $cfgData = Load-ConfigSettings
+$timeoutSlider.Maximum = [math]::Max(1200, $cfgData.timeout)
+$timerSlider.Maximum = [math]::Max(300, $cfgData.timerTimeout)
 $timeoutSlider.Value = $cfgData.timeout
 $timerSlider.Value = $cfgData.timerTimeout
 $chkSmartIdle.IsChecked = $cfgData.smartIdle
@@ -330,11 +351,21 @@ $timerSlider.Add_ValueChanged({ $timerDisplay.Text = Format-SecDisplay $timerSli
 
 $script:asyncTimer = $null
 
-function Invoke-AsyncDaemonAction([string]$actionTitle, [string]$actionType) {
-    $btnStart.IsEnabled = $false
-    $btnStop.IsEnabled  = $false
-    $btnRestart.IsEnabled = $false
+function Complete-LoadingOverlay([int]$ms = 300) {
+    $t = New-TransientTimer
+    $t.Interval = [TimeSpan]::FromMilliseconds($ms)
+    $t.Add_Tick({
+        param($s, $e)
+        $s.Stop()
+        $loadingOverlay.Visibility = [System.Windows.Visibility]::Collapsed
+        Update-ServiceStatusUI
+        Refresh-LogViewer
+    })
+    $t.Start()
+}
 
+function Invoke-AsyncDaemonAction([string]$actionTitle, [string]$actionType) {
+    $btnStart.IsEnabled = $false; $btnStop.IsEnabled = $false; $btnRestart.IsEnabled = $false
     $loadingTitle.Text = $actionTitle
     $loadingDetail.Text = if ($actionType -eq "stop") { "Sending stop signal..." } elseif ($actionType -eq "restart") { "Stopping active daemon..." } else { "Starting daemon..." }
     $loadingProgress.Foreground = if ($actionType -eq "stop") { $brRed } elseif ($actionType -eq "start") { $brGreen } else { $bActive }
@@ -342,16 +373,7 @@ function Invoke-AsyncDaemonAction([string]$actionTitle, [string]$actionType) {
 
     if ($actionType -eq "start") {
         Start-DaemonService
-        $t = [System.Windows.Threading.DispatcherTimer]::new()
-        $t.Interval = [TimeSpan]::FromMilliseconds(500)
-        $t.Add_Tick({
-            param($s, $e)
-            $s.Stop()
-            $loadingOverlay.Visibility = [System.Windows.Visibility]::Collapsed
-            Update-ServiceStatusUI
-            Refresh-LogViewer
-        })
-        $t.Start()
+        Complete-LoadingOverlay 500
         return
     }
 
@@ -366,26 +388,13 @@ function Invoke-AsyncDaemonAction([string]$actionTitle, [string]$actionType) {
         $loadingTitle.Text = "Execution Error"
         $loadingDetail.Text = "Failed to launch process: $($_.Exception.Message)"
         $loadingProgress.Foreground = $brRed
-        $t = [System.Windows.Threading.DispatcherTimer]::new()
-        $t.Interval = [TimeSpan]::FromSeconds(2)
-        $t.Add_Tick({
-            param($s, $e)
-            $s.Stop()
-            $loadingOverlay.Visibility = [System.Windows.Visibility]::Collapsed
-            Update-ServiceStatusUI
-            Refresh-LogViewer
-        })
-        $t.Start()
+        Complete-LoadingOverlay 2000
         return
     }
 
     $script:asyncTimer = [System.Windows.Threading.DispatcherTimer]::new()
     $script:asyncTimer.Interval = [TimeSpan]::FromMilliseconds(150)
-    $script:asyncTimer.Tag = @{
-        Proc       = $proc
-        Step       = 0
-        ActionType = $actionType
-    }
+    $script:asyncTimer.Tag = @{ Proc = $proc; Step = 0; ActionType = $actionType }
     $script:asyncTimer.Add_Tick({
         param($timer, $e)
         $state = $timer.Tag
@@ -395,64 +404,32 @@ function Invoke-AsyncDaemonAction([string]$actionTitle, [string]$actionType) {
         $act = $state.ActionType
 
         if ($step -gt 35) {
-            # 5-second hard ceiling exceeded: safely terminate and reset UI
             $timer.Stop()
             try { if ($proc -and -not $proc.HasExited) { $proc.Kill() } } catch {}
             if ($proc) { $proc.Dispose() }
             $loadingTitle.Text = "Operation Timed Out"
             $loadingDetail.Text = "Process exceeded 5s ceiling; UI safely recovered."
             $loadingProgress.Foreground = $brRed
-            $postTimer = [System.Windows.Threading.DispatcherTimer]::new()
-            $postTimer.Interval = [TimeSpan]::FromSeconds(2)
-            $postTimer.Add_Tick({
-                param($ps, $pe)
-                $ps.Stop()
-                $loadingOverlay.Visibility = [System.Windows.Visibility]::Collapsed
-                Update-ServiceStatusUI
-                Refresh-LogViewer
-            })
-            $postTimer.Start()
+            Complete-LoadingOverlay 2000
             return
         }
 
         if ($proc.HasExited) {
             $timer.Stop()
             $proc.Dispose()
-
             if ($act -eq "restart") {
                 $loadingTitle.Text = "Restarting Service..."
                 $loadingDetail.Text = "Launching background daemon..."
                 $loadingProgress.Foreground = $brGreen
                 Start-DaemonService
-                $postTimer = [System.Windows.Threading.DispatcherTimer]::new()
-                $postTimer.Interval = [TimeSpan]::FromMilliseconds(600)
-                $postTimer.Add_Tick({
-                    param($ps, $pe)
-                    $ps.Stop()
-                    $loadingOverlay.Visibility = [System.Windows.Visibility]::Collapsed
-                    Update-ServiceStatusUI
-                    Refresh-LogViewer
-                })
-                $postTimer.Start()
+                Complete-LoadingOverlay 600
             } else {
                 $loadingDetail.Text = "Service stopped successfully."
-                $postTimer = [System.Windows.Threading.DispatcherTimer]::new()
-                $postTimer.Interval = [TimeSpan]::FromMilliseconds(250)
-                $postTimer.Add_Tick({
-                    param($ps, $pe)
-                    $ps.Stop()
-                    $loadingOverlay.Visibility = [System.Windows.Visibility]::Collapsed
-                    Update-ServiceStatusUI
-                    Refresh-LogViewer
-                })
-                $postTimer.Start()
+                Complete-LoadingOverlay 250
             }
         } else {
-            if ($step -gt 6 -and $step -le 14) {
-                $loadingDetail.Text = "Waiting for daemon shutdown..."
-            } elseif ($step -gt 14) {
-                $loadingDetail.Text = "Finalizing process cleanup..."
-            }
+            if ($step -gt 6 -and $step -le 14) { $loadingDetail.Text = "Waiting for daemon shutdown..." }
+            elseif ($step -gt 14) { $loadingDetail.Text = "Finalizing process cleanup..." }
         }
     })
     $script:asyncTimer.Start()
@@ -467,7 +444,7 @@ $btnSave.Add_Click({
     Set-StartupEnabled ([bool]$chkStartup.IsChecked)
     if ($ok) { $saveFeedback.Text = "[OK] Settings saved! Dynamically reloaded."; $saveFeedback.Foreground = $brGreen }
     else { $saveFeedback.Text = "[!] Error saving config.json."; $saveFeedback.Foreground = $brRed }
-    $t = [System.Windows.Threading.DispatcherTimer]::new(); $t.Interval = [TimeSpan]::FromSeconds(3)
+    $t = New-TransientTimer; $t.Interval = [TimeSpan]::FromSeconds(3)
     $t.Add_Tick({ param($s, $e); $saveFeedback.Text = ""; $s.Stop() }); $t.Start(); Refresh-LogViewer
 })
 
@@ -478,6 +455,12 @@ $script:soundPlayer = $null
 if (Test-Path $alarmWavPath) {
     try { $script:soundPlayer = [System.Media.SoundPlayer]::new($alarmWavPath) } catch {}
 }
+$script:asTaskMethod = $null
+try {
+    $script:asTaskMethod = [System.WindowsRuntimeSystemExtensions].GetMethods() | 
+        Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' } | 
+        Select-Object -First 1
+} catch {}
 
 $btnTestAlarm.Add_Click({
     $btnTestAlarm.IsEnabled = $false
@@ -527,23 +510,24 @@ $btnTestAlarm.Add_Click({
             try {
                 $listener = [Windows.UI.Notifications.Management.UserNotificationListener]::Current
                 $op = $listener.GetNotificationsAsync([Windows.UI.Notifications.NotificationKinds]::Toast)
-                $asTask = [System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' } | Select-Object -First 1
-                $task = $asTask.MakeGenericMethod([System.Collections.Generic.IReadOnlyList[Windows.UI.Notifications.UserNotification]]).Invoke($null, @($op))
-                if ($task.Wait(15000)) {
-                    foreach ($n in $task.Result) {
-                        try {
-                            $b = $n.Notification.Visual.GetBinding("ToastGeneric")
-                            if ($b) {
-                                foreach ($t in $b.GetTextElements()) {
-                                    if ($t.Text -and $t.Text.Contains("AlarmAutoDismiss-Test")) { $listener.RemoveNotification($n.Id) }
+                if ($script:asTaskMethod) {
+                    $task = $script:asTaskMethod.MakeGenericMethod([System.Collections.Generic.IReadOnlyList[Windows.UI.Notifications.UserNotification]]).Invoke($null, @($op))
+                    if ($task.Wait(15000)) {
+                        foreach ($n in $task.Result) {
+                            try {
+                                $b = $n.Notification.Visual.GetBinding("ToastGeneric")
+                                if ($b) {
+                                    foreach ($t in $b.GetTextElements()) {
+                                        if ($t.Text -and $t.Text.Contains("AlarmAutoDismiss-Test")) { $listener.RemoveNotification($n.Id) }
+                                    }
                                 }
-                            }
-                        } catch {}
+                            } catch {}
+                        }
                     }
                 }
             } catch {}
 
-            $ht = [System.Windows.Threading.DispatcherTimer]::new()
+            $ht = New-TransientTimer
             $ht.Interval = [TimeSpan]::FromSeconds(3)
             $ht.Add_Tick({
                 param($s, $e)
@@ -560,10 +544,11 @@ $btnTestAlarm.Add_Click({
 })
 
 $window.Add_Closing({
-    if ($script:soundPlayer) { try { $script:soundPlayer.Stop() } catch {} }
+    if ($script:soundPlayer) { try { $script:soundPlayer.Stop(); $script:soundPlayer.Dispose() } catch {} }
     if ($script:testTimer) { try { $script:testTimer.Stop() } catch {} }
     if ($script:asyncTimer) { try { $script:asyncTimer.Stop() } catch {} }
     if ($pollTimer) { try { $pollTimer.Stop() } catch {} }
+    foreach ($t in $script:transientTimers) { if ($t) { try { $t.Stop() } catch {} } }
 })
 
 $btnRefreshLog.Add_Click({ Refresh-LogViewer })

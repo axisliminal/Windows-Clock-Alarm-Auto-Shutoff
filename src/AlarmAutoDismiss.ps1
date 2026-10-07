@@ -5,7 +5,7 @@ param(
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $pDir = Split-Path -Parent $scriptDir
-$baseDir = if (Test-Path (Join-Path $pDir "config.json")) { $pDir } else { $scriptDir }
+$baseDir = if ((Split-Path -Leaf $scriptDir) -eq 'src') { $pDir } else { $scriptDir }
 $logPath = Join-Path $baseDir "alarm_history.log"
 $configPath = Join-Path $baseDir "config.json"
 $stopSignalPath = Join-Path $baseDir ".stop_signal"
@@ -34,6 +34,15 @@ function Get-ValidConfigInt($val, [int]$min, [int]$max, [int]$defaultVal) {
     return $defaultVal
 }
 
+# Resilient boolean parsing helper (neutralizes [bool]"false" == $true trap)
+function Get-ValidConfigBool($val, [bool]$defaultVal) {
+    if ($null -eq $val) { return $defaultVal }
+    $s = "$val".Trim().ToLower()
+    if ($s -eq 'true' -or $s -eq '1') { return $true }
+    if ($s -eq 'false' -or $s -eq '0') { return $false }
+    return $defaultVal
+}
+
 # Load config
 $timeoutSeconds = 300
 $timerTimeoutSeconds = 60
@@ -45,10 +54,10 @@ if (Test-Path $configPath) {
         $cfg = Get-Content $configPath -Raw | ConvertFrom-Json
         $timeoutSeconds = Get-ValidConfigInt $cfg.timeoutSeconds 5 86400 $timeoutSeconds
         $timerTimeoutSeconds = Get-ValidConfigInt $cfg.timerTimeoutSeconds 5 86400 $timerTimeoutSeconds
-        if ($null -ne $cfg.smartIdleGating) { $smartIdleGating = [bool]$cfg.smartIdleGating }
-        if ($null -ne $cfg.notifyOnDismiss) { $notifyOnDismiss = [bool]$cfg.notifyOnDismiss }
+        $smartIdleGating = Get-ValidConfigBool $cfg.smartIdleGating $smartIdleGating
+        $notifyOnDismiss = Get-ValidConfigBool $cfg.notifyOnDismiss $notifyOnDismiss
         $checkIntervalSeconds = Get-ValidConfigInt $cfg.checkIntervalSeconds 1 60 $checkIntervalSeconds
-        if ($null -ne $cfg.loggingEnabled) { $loggingEnabled = [bool]$cfg.loggingEnabled }
+        $loggingEnabled = Get-ValidConfigBool $cfg.loggingEnabled $loggingEnabled
     } catch {
         Write-Log "WARNING: Failed to parse config.json, using defaults: $($_.Exception.Message)"
     }
@@ -303,8 +312,10 @@ function Get-IdleTimeSeconds {
         [byte[]]$b = New-Object byte[] 8
         [BitConverter]::GetBytes([uint32]8).CopyTo($b, 0)
         if ([NativeEco]::GetLastInputInfo($b)) {
-            $diff = [uint32][Environment]::TickCount - [BitConverter]::ToUInt32($b, 4)
-            return [uint32][math]::Floor($diff / 1000)
+            $curr32 = [int64][Environment]::TickCount -band 0xFFFFFFFFL
+            $last32 = [int64][BitConverter]::ToUInt32($b, 4) -band 0xFFFFFFFFL
+            $diffMs = ($curr32 - $last32) -band 0xFFFFFFFFL
+            return [uint32][math]::Floor($diffMs / 1000)
         }
     } catch {}
     return [uint32]0
@@ -416,17 +427,26 @@ while ($true) {
                     $timerTimeoutSeconds = $newTimerTimeout
                     Write-Log "Settings reloaded from config.json: Timer timeout set to ${timerTimeoutSeconds}s."
                 }
-                if ($null -ne $cfg.smartIdleGating -and $cfg.smartIdleGating -ne $smartIdleGating) {
-                    $smartIdleGating = [bool]$cfg.smartIdleGating
-                    Write-Log "Settings reloaded from config.json: Smart Idle Gating set to ${smartIdleGating}."
+                if ($null -ne $cfg.smartIdleGating) {
+                    $newSmartIdle = Get-ValidConfigBool $cfg.smartIdleGating $smartIdleGating
+                    if ($newSmartIdle -ne $smartIdleGating) {
+                        $smartIdleGating = $newSmartIdle
+                        Write-Log "Settings reloaded from config.json: Smart Idle Gating set to ${smartIdleGating}."
+                    }
                 }
-                if ($null -ne $cfg.notifyOnDismiss -and $cfg.notifyOnDismiss -ne $notifyOnDismiss) {
-                    $notifyOnDismiss = [bool]$cfg.notifyOnDismiss
-                    Write-Log "Settings reloaded from config.json: Notify On Dismiss set to ${notifyOnDismiss}."
+                if ($null -ne $cfg.notifyOnDismiss) {
+                    $newNotify = Get-ValidConfigBool $cfg.notifyOnDismiss $notifyOnDismiss
+                    if ($newNotify -ne $notifyOnDismiss) {
+                        $notifyOnDismiss = $newNotify
+                        Write-Log "Settings reloaded from config.json: Notify On Dismiss set to ${notifyOnDismiss}."
+                    }
                 }
-                if ($null -ne $cfg.loggingEnabled -and $cfg.loggingEnabled -ne $loggingEnabled) {
-                    $loggingEnabled = [bool]$cfg.loggingEnabled
-                    Write-Log "Settings reloaded from config.json: Logging Enabled set to ${loggingEnabled}."
+                if ($null -ne $cfg.loggingEnabled) {
+                    $newLogging = Get-ValidConfigBool $cfg.loggingEnabled $loggingEnabled
+                    if ($newLogging -ne $loggingEnabled) {
+                        $loggingEnabled = $newLogging
+                        Write-Log "Settings reloaded from config.json: Logging Enabled set to ${loggingEnabled}."
+                    }
                 }
                 $checkIntervalSeconds = Get-ValidConfigInt $cfg.checkIntervalSeconds 1 60 $checkIntervalSeconds
                 # Concurrency hardening: only advance timestamp marker after successful parse
@@ -439,8 +459,8 @@ while ($true) {
         # Query active toast notifications
         $op = $listener.GetNotificationsAsync([Windows.UI.Notifications.NotificationKinds]::Toast)
         $task = $asTaskGeneric.MakeGenericMethod([System.Collections.Generic.IReadOnlyList[Windows.UI.Notifications.UserNotification]]).Invoke($null, @($op))
-        if (-not $task.Wait(15000)) {
-            Write-Log "WARNING: UserNotificationListener query timed out after 15000ms."
+        if (-not $task.Wait(15000) -or $task.Status -ne 'RanToCompletion') {
+            Write-Log "WARNING: UserNotificationListener query incomplete or timed out (Status: $($task.Status))."
             Start-Sleep -Seconds $checkIntervalSeconds
             continue
         }
@@ -474,10 +494,17 @@ while ($true) {
                         if ($n.Notification -and $n.Notification.Visual) {
                             $b = $n.Notification.Visual.GetBinding("ToastGeneric")
                             if ($b) {
-                                foreach ($t in $b.GetTextElements()) {
+                                $txts = @($b.GetTextElements())
+                                foreach ($t in $txts) {
                                     if ($t.Text) {
                                         if (($isClockAlarm -or ($aumid -and $aumid -like "*PowerShell*")) -and $t.Text.Contains($testTag)) { $isTestToast = $true }
-                                        if ($t.Text -match "(?i)\b(timer|minuteur|temporizador|temporizzatore|таймер|タイマー|计时器|計時器|타이머|टाइमर)\b") { $isTimer = $true }
+                                    }
+                                }
+                                # Windows Clock countdown timers present the localized timer title as element 0
+                                # (e.g. "Timer", "Timer 1", "Timer (2)", "Minuteur") rather than multi-word user alarm labels
+                                if ($txts.Count -gt 0 -and $txts[0].Text) {
+                                    if ($txts[0].Text -match "^(?i)(timer|minuteur|temporizador|temporizzatore|таймер|タイマー|计时器|計時器|타이머|टाइमर)(\s*(\d+|\(\d+\)))?$") {
+                                        $isTimer = $true
                                     }
                                 }
                             }
