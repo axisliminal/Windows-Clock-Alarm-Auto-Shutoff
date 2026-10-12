@@ -81,12 +81,21 @@ function Load-ConfigSettings {
     return $c
 }
 
+function Signal-DaemonWake {
+    try {
+        $w = [System.Threading.EventWaitHandle]::OpenExisting("Local\AlarmAutoDismiss_WakeEvent")
+        $w.Set(); $w.Close()
+    } catch {}
+}
+
 function Save-ConfigSettings([int]$timeout, [int]$timerTimeout, [bool]$smartIdle, [bool]$notify) {
-    $cInt = 2; $logEn = $true
+    $cInt = 10; $bInt = 25; $aInt = 2; $logEn = $true
     if (Test-Path $configPath) {
         try {
             $ex = Get-Content $configPath -Raw | ConvertFrom-Json
-            $cInt = Get-ValidConfigInt $ex.checkIntervalSeconds 1 60 2
+            $cInt = Get-ValidConfigInt $ex.checkIntervalSeconds 1 60 10
+            $bInt = Get-ValidConfigInt $ex.batteryCheckIntervalSeconds 1 60 25
+            $aInt = Get-ValidConfigInt $ex.activeCheckIntervalSeconds 1 10 2
             $logEn = Get-ValidConfigBool $ex.loggingEnabled $true
         } catch {}
     }
@@ -96,6 +105,8 @@ function Save-ConfigSettings([int]$timeout, [int]$timerTimeout, [bool]$smartIdle
         smartIdleGating = $smartIdle
         notifyOnDismiss = $notify
         checkIntervalSeconds = $cInt
+        batteryCheckIntervalSeconds = $bInt
+        activeCheckIntervalSeconds = $aInt
         loggingEnabled = $logEn
     } | ConvertTo-Json
     $tmp = "$configPath.tmp"
@@ -152,7 +163,7 @@ function Save-ConfigSettings([int]$timeout, [int]$timerTimeout, [bool]$smartIdle
 <TextBlock Text="Clock Auto-Dismiss Settings" FontSize="12" Foreground="#9E9E9E" Margin="0,2,0,0"/>
 </StackPanel>
 <Border Grid.Column="1" Background="#242830" BorderBrush="#303848" BorderThickness="1" CornerRadius="12" Padding="10,3" VerticalAlignment="Center">
-<TextBlock Text="v1.6.10 | Telemetry Enhanced" FontSize="11" Foreground="#4DA3FF" FontWeight="SemiBold"/>
+<TextBlock Text="v1.6.12 | Ultra-Low Power" FontSize="11" Foreground="#4DA3FF" FontWeight="SemiBold"/>
 </Border>
 </Grid>
 <Border Style="{StaticResource Card}">
@@ -442,6 +453,7 @@ $btnRestart.Add_Click({ Invoke-AsyncDaemonAction "Restarting Service..." "restar
 $btnSave.Add_Click({
     $ok = Save-ConfigSettings ([int]$timeoutSlider.Value) ([int]$timerSlider.Value) ([bool]$chkSmartIdle.IsChecked) ([bool]$chkNotify.IsChecked)
     Set-StartupEnabled ([bool]$chkStartup.IsChecked)
+    Signal-DaemonWake
     if ($ok) { $saveFeedback.Text = "[OK] Settings saved! Dynamically reloaded."; $saveFeedback.Foreground = $brGreen }
     else { $saveFeedback.Text = "[!] Error saving config.json."; $saveFeedback.Foreground = $brRed }
     $t = New-TransientTimer; $t.Interval = [TimeSpan]::FromSeconds(3)
@@ -486,6 +498,7 @@ $btnTestAlarm.Add_Click({
         $toast = [Windows.UI.Notifications.ToastNotification]::new($doc)
         $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("Microsoft.WindowsAlarms_8wekyb3d8bbwe")
         $notifier.Show($toast)
+        Signal-DaemonWake
     } catch {}
 
     $script:testStartTime = [DateTime]::UtcNow

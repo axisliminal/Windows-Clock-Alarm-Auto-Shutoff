@@ -48,7 +48,9 @@ $timeoutSeconds = 300
 $timerTimeoutSeconds = 60
 $smartIdleGating = $false
 $notifyOnDismiss = $true
-$checkIntervalSeconds = 2
+$checkIntervalSeconds = 10
+$batteryCheckIntervalSeconds = 25
+$activeCheckIntervalSeconds = 2
 if (Test-Path $configPath) {
     try {
         $cfg = Get-Content $configPath -Raw | ConvertFrom-Json
@@ -57,6 +59,8 @@ if (Test-Path $configPath) {
         $smartIdleGating = Get-ValidConfigBool $cfg.smartIdleGating $smartIdleGating
         $notifyOnDismiss = Get-ValidConfigBool $cfg.notifyOnDismiss $notifyOnDismiss
         $checkIntervalSeconds = Get-ValidConfigInt $cfg.checkIntervalSeconds 1 60 $checkIntervalSeconds
+        $batteryCheckIntervalSeconds = Get-ValidConfigInt $cfg.batteryCheckIntervalSeconds 1 60 $batteryCheckIntervalSeconds
+        $activeCheckIntervalSeconds = Get-ValidConfigInt $cfg.activeCheckIntervalSeconds 1 10 $activeCheckIntervalSeconds
         $loggingEnabled = Get-ValidConfigBool $cfg.loggingEnabled $loggingEnabled
     } catch {
         Write-Log "WARNING: Failed to parse config.json, using defaults: $($_.Exception.Message)"
@@ -101,10 +105,15 @@ function Send-SilentMissedToast([string]$title, [string]$body) {
 # --- Action: -stop ---
 if ($Action -match "^[-/]?stop$") {
     Write-Host "Sending stop signal to AlarmAutoDismiss..."
+    try {
+        $stopEvt = [System.Threading.EventWaitHandle]::OpenExisting("Local\AlarmAutoDismiss_StopEvent")
+        $stopEvt.Set()
+        $stopEvt.Close()
+    } catch {}
     Set-Content -Path $stopSignalPath -Value "STOP" -ErrorAction SilentlyContinue
     $gracefulExit = $false
     for ($i = 0; $i -lt 20; $i++) {
-        Start-Sleep -Milliseconds 150
+        Start-Sleep -Milliseconds 100
         try {
             $m = [System.Threading.Mutex]::OpenExisting("Local\AlarmAutoDismiss_PS1_SingleInstance")
             $m.Close()
@@ -196,7 +205,16 @@ if ($Action -match "^[-/]?status$") {
         if (Test-Path $candidateLog) { $targetLogPath = $candidateLog }
     }
 
+    $onBattery = $false
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+        $onBattery = ([System.Windows.Forms.SystemInformation]::PowerStatus.PowerLineStatus -eq [System.Windows.Forms.PowerLineStatus]::Offline)
+    } catch {}
+    $currInterval = if ($onBattery) { $batteryCheckIntervalSeconds } else { $checkIntervalSeconds }
+
+    Write-Host "  Power Source:    $(if ($onBattery) { "Battery / DC (${batteryCheckIntervalSeconds}s adaptive polling)" } else { "AC Power / Plugged In (${checkIntervalSeconds}s polling)" })" -ForegroundColor White
     Write-Host "  Thresholds:      Alarms: ${timeoutSeconds}s | Timers: ${timerTimeoutSeconds}s" -ForegroundColor DarkGray
+    Write-Host "  Intervals:       AC: ${checkIntervalSeconds}s | Battery: ${batteryCheckIntervalSeconds}s | Active Ringing: ${activeCheckIntervalSeconds}s (Effective: ${currInterval}s)" -ForegroundColor DarkGray
     Write-Host "  Smart Idle:      $(if ($smartIdleGating) { 'Enabled' } else { 'Disabled' }) | Silent Reminder: $(if ($notifyOnDismiss) { 'Enabled' } else { 'Disabled' })" -ForegroundColor DarkGray
     Write-Host "--------------------------------------------------" -ForegroundColor DarkGray
     Write-Host "  Recent Activity (alarm_history.log):" -ForegroundColor Gray
@@ -254,6 +272,11 @@ if ($Action -match "^[-/]?test$") {
 
     Write-Host "[1/3] Playing alarm toast with looping audio..."
     $notifier.Show($toast)
+    try {
+        $wEvt = [System.Threading.EventWaitHandle]::OpenExisting("Local\AlarmAutoDismiss_WakeEvent")
+        $wEvt.Set()
+        $wEvt.Close()
+    } catch {}
 
     $alarmWav = "C:\Windows\Media\Alarm01.wav"
     $soundPlayer = $null
@@ -361,6 +384,42 @@ if (-not $mutexCreated) {
     }
 }
 
+# Create named EventWaitHandle for zero-interrupt idle wait and sub-millisecond stop signaling
+$stopEvent = $null
+try {
+    $evtCreated = $false
+    $evtSec = New-Object System.Security.AccessControl.EventWaitHandleSecurity
+    $evtRule = New-Object System.Security.AccessControl.EventWaitHandleAccessRule(
+        $currentUser,
+        [System.Security.AccessControl.EventWaitHandleRights]::FullControl,
+        [System.Security.AccessControl.AccessControlType]::Allow
+    )
+    $evtSec.AddAccessRule($evtRule)
+    $stopEvent = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::ManualReset, "Local\AlarmAutoDismiss_StopEvent", [ref]$evtCreated, $evtSec)
+} catch {
+    try {
+        $stopEvent = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::ManualReset, "Local\AlarmAutoDismiss_StopEvent")
+    } catch {}
+}
+
+# Create named EventWaitHandle for instant wake signaling (Save Settings / Test Alarm / Wake)
+$wakeEvent = $null
+try {
+    $wEvtCreated = $false
+    $wEvtSec = New-Object System.Security.AccessControl.EventWaitHandleSecurity
+    $wEvtRule = New-Object System.Security.AccessControl.EventWaitHandleAccessRule(
+        $currentUser,
+        [System.Security.AccessControl.EventWaitHandleRights]::FullControl,
+        [System.Security.AccessControl.AccessControlType]::Allow
+    )
+    $wEvtSec.AddAccessRule($wEvtRule)
+    $wakeEvent = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::AutoReset, "Local\AlarmAutoDismiss_WakeEvent", [ref]$wEvtCreated, $wEvtSec)
+} catch {
+    try {
+        $wakeEvent = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::AutoReset, "Local\AlarmAutoDismiss_WakeEvent")
+    } catch {}
+}
+
 try {
     # Rotate log if larger than 512 KB
     if (Test-Path $logPath) {
@@ -413,6 +472,11 @@ function Get-IdleTimeSeconds {
     return [uint32]0
 }
 
+# Set Process Priority to BelowNormal for Windows 11 E-core affinity without starvation risk
+try {
+    [System.Diagnostics.Process]::GetCurrentProcess().PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal
+} catch {}
+
 # Opt into Windows 11 EcoQoS (Efficiency Mode)
 $ecoSuccess = $false
 try {
@@ -421,15 +485,17 @@ try {
 
 Remove-Item $stopSignalPath -Force -ErrorAction SilentlyContinue
 
-Write-Log "=== PowerShell Daemon started (PID: $PID, AlarmTimeout: ${timeoutSeconds}s, TimerTimeout: ${timerTimeoutSeconds}s, SmartIdle: $smartIdleGating, Interval: ${checkIntervalSeconds}s, EcoQoS: $ecoSuccess) ==="
+Write-Log "=== PowerShell Daemon started (PID: $PID, AlarmTimeout: ${timeoutSeconds}s, TimerTimeout: ${timerTimeoutSeconds}s, SmartIdle: $smartIdleGating, Interval: ${checkIntervalSeconds}s, BatteryInterval: ${batteryCheckIntervalSeconds}s, ActiveInterval: ${activeCheckIntervalSeconds}s, EcoQoS: $ecoSuccess) ==="
 
-# Initialize WinRT UserNotificationListener
+# Initialize WinRT UserNotificationListener & Forms
 try {
     [Windows.UI.Notifications.Management.UserNotificationListener, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
     Add-Type -AssemblyName System.Runtime.WindowsRuntime
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
     $asTaskGeneric = [System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { 
         $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' 
     } | Select-Object -First 1
+    $asTaskMethod = $asTaskGeneric.MakeGenericMethod(@([System.Collections.Generic.IReadOnlyList[Windows.UI.Notifications.UserNotification]]))
 
     $listener = [Windows.UI.Notifications.Management.UserNotificationListener]::Current
     $status = $listener.GetAccessStatus()
@@ -490,6 +556,7 @@ $firstSeenMap = @{}
 $lastIdleLog = @{}
 $lastMemoryTrim = [DateTime]::UtcNow
 $steadyTrimDone = $false
+$currIntervalSec = $checkIntervalSeconds
 
 $lastConfigModified = [DateTime]::MinValue
 if (Test-Path $configPath) {
@@ -541,6 +608,8 @@ while ($true) {
                     }
                 }
                 $checkIntervalSeconds = Get-ValidConfigInt $cfg.checkIntervalSeconds 1 60 $checkIntervalSeconds
+                $batteryCheckIntervalSeconds = Get-ValidConfigInt $cfg.batteryCheckIntervalSeconds 1 60 $batteryCheckIntervalSeconds
+                $activeCheckIntervalSeconds = Get-ValidConfigInt $cfg.activeCheckIntervalSeconds 1 10 $activeCheckIntervalSeconds
                 # Concurrency hardening: only advance timestamp marker after successful parse
                 $lastConfigModified = $currModified
             }
@@ -550,10 +619,19 @@ while ($true) {
     try {
         # Query active toast notifications
         $op = $listener.GetNotificationsAsync([Windows.UI.Notifications.NotificationKinds]::Toast)
-        $task = $asTaskGeneric.MakeGenericMethod([System.Collections.Generic.IReadOnlyList[Windows.UI.Notifications.UserNotification]]).Invoke($null, @($op))
+        $task = $asTaskMethod.Invoke($null, @($op))
         if (-not $task.Wait(15000) -or $task.Status -ne 'RanToCompletion') {
             Write-Log "WARNING: UserNotificationListener query incomplete or timed out (Status: $($task.Status))."
-            Start-Sleep -Seconds $checkIntervalSeconds
+            if ($stopEvent -and $wakeEvent) {
+                $signaledIdx = [System.Threading.WaitHandle]::WaitAny(@($stopEvent, $wakeEvent), [int]($currIntervalSec * 1000))
+                if ($signaledIdx -eq 0 -or (Test-Path $stopSignalPath)) { break }
+            } elseif ($stopEvent) {
+                $signaled = $stopEvent.WaitOne([int]($currIntervalSec * 1000))
+                if ($signaled -or (Test-Path $stopSignalPath)) { break }
+            } else {
+                Start-Sleep -Seconds $currIntervalSec
+                if (Test-Path $stopSignalPath) { break }
+            }
             continue
         }
         $notifs = $task.Result
@@ -719,17 +797,15 @@ while ($true) {
             } catch {}
         }
 
-        # Periodic memory compaction (every 10 minutes, or when idle working set exceeds 25MB)
+        # Periodic memory compaction (relaxed: every 30 minutes, or when idle working set exceeds 50MB)
         $timeSinceTrim = [DateTime]::UtcNow - $lastMemoryTrim
-        $needTrim = ($timeSinceTrim.TotalMinutes -ge 10) -or ($firstSeenMap.Count -eq 0 -and $timeSinceTrim.TotalSeconds -ge 30 -and [System.Diagnostics.Process]::GetCurrentProcess().WorkingSet64 -gt 25MB)
+        $needTrim = ($timeSinceTrim.TotalMinutes -ge 30) -or ($firstSeenMap.Count -eq 0 -and $timeSinceTrim.TotalMinutes -ge 10 -and [System.Diagnostics.Process]::GetCurrentProcess().WorkingSet64 -gt 50MB)
         if ($needTrim) {
             $lastMemoryTrim = [DateTime]::UtcNow
             try {
                 [System.GC]::Collect()
                 [System.GC]::WaitForPendingFinalizers()
                 Trim-WorkingSet
-                $curMb = [math]::Round((Get-Process -Id $PID).WorkingSet64 / 1MB, 2)
-                Write-Log "Periodic memory compaction applied. Active working set: ${curMb} MB."
             } catch {}
 
             # In-loop periodic log rotation (>512 KB to tail 500 lines)
@@ -743,10 +819,32 @@ while ($true) {
             }
         }
 
-        # Responsive sleep sliced in 200ms increments to react immediately to stop signals
-        $sleepTicks = [int](($checkIntervalSeconds * 1000) / 200)
-        for ($s = 0; $s -lt $sleepTicks; $s++) {
-            Start-Sleep -Milliseconds 200
+        # Dual-Speed adaptive sleep: 2s active alarm tracking vs 10s/25s deep idle
+        $onBattery = $false
+        try {
+            $onBattery = ([System.Windows.Forms.SystemInformation]::PowerStatus.PowerLineStatus -eq [System.Windows.Forms.PowerLineStatus]::Offline)
+        } catch {}
+        $currIntervalSec = if ($firstSeenMap.Count -gt 0) {
+            $activeCheckIntervalSeconds
+        } elseif ($onBattery) {
+            $batteryCheckIntervalSeconds
+        } else {
+            $checkIntervalSeconds
+        }
+        $sleepMs = [int]($currIntervalSec * 1000)
+
+        # Single unmanaged kernel wait via EventWaitHandle: zero timer interrupts, sub-millisecond stop/wake reaction
+        if ($stopEvent -and $wakeEvent) {
+            $signaledIdx = [System.Threading.WaitHandle]::WaitAny(@($stopEvent, $wakeEvent), $sleepMs)
+            if ($signaledIdx -eq 0 -or (Test-Path $stopSignalPath)) { break }
+            if ($signaledIdx -eq 1) {
+                Write-Log "WAKE: WakeEvent received. Resuming polling immediately."
+            }
+        } elseif ($stopEvent) {
+            $signaled = $stopEvent.WaitOne($sleepMs)
+            if ($signaled -or (Test-Path $stopSignalPath)) { break }
+        } else {
+            Start-Sleep -Seconds $currIntervalSec
             if (Test-Path $stopSignalPath) { break }
         }
     }
@@ -761,6 +859,12 @@ while ($true) {
         }
     } catch {}
     Remove-Item $stopSignalPath -Force -ErrorAction SilentlyContinue
+    if ($wakeEvent) {
+        try { $wakeEvent.Close() } catch {}
+    }
+    if ($stopEvent) {
+        try { $stopEvent.Close() } catch {}
+    }
     if ($mutex) {
         try { $mutex.ReleaseMutex() } catch {}
         $mutex.Close()

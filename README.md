@@ -56,7 +56,9 @@ Settings can be changed via the Control Panel or edited directly in `config.json
   "timerTimeoutSeconds": 60,
   "smartIdleGating": false,
   "notifyOnDismiss": true,
-  "checkIntervalSeconds": 2,
+  "checkIntervalSeconds": 10,
+  "batteryCheckIntervalSeconds": 25,
+  "activeCheckIntervalSeconds": 2,
   "loggingEnabled": true
 }
 ```
@@ -65,7 +67,9 @@ Settings can be changed via the Control Panel or edited directly in `config.json
 - `timerTimeoutSeconds`: Duration (in seconds) before a countdown timer is silenced (default: `60`).
 - `smartIdleGating`: When `true`, defers shutoff while keyboard/mouse input is active, up to a 60-second grace ceiling (default: `false`).
 - `notifyOnDismiss`: When `true`, posts a silent Action Center reminder after auto-shutoff (default: `true`).
-- `checkIntervalSeconds`: Background polling frequency in seconds (default: `2`).
+- `checkIntervalSeconds`: Quiet idle polling frequency on AC power in seconds (default: `10`).
+- `batteryCheckIntervalSeconds`: Quiet idle polling frequency on DC battery in seconds (default: `25`).
+- `activeCheckIntervalSeconds`: High-precision polling frequency while an alarm/timer is actively ringing (default: `2`).
 - `loggingEnabled`: Enables event logging to `alarm_history.log` (default: `true`).
 
 *(Note: Auto-start on Windows login is managed via the Control Panel toggle or `Setup.bat`, storing its state directly in `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`).*

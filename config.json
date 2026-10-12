@@ -3,6 +3,8 @@
     "timerTimeoutSeconds": 60,
     "smartIdleGating": false,
     "notifyOnDismiss": true,
-    "checkIntervalSeconds": 2,
+    "checkIntervalSeconds": 10,
+    "batteryCheckIntervalSeconds": 25,
+    "activeCheckIntervalSeconds": 2,
     "loggingEnabled": true
 }
