@@ -6,6 +6,7 @@ Only the latest release receives active security patches. We recommend all users
 
 | Version | Supported          |
 | ------- | ------------------ |
+| 1.7.x   | :white_check_mark: |
 | 1.6.x   | :white_check_mark: |
 | < 1.6.0 | :x:                |
 

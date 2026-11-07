@@ -6,5 +6,7 @@
     "checkIntervalSeconds": 10,
     "batteryCheckIntervalSeconds": 25,
     "activeCheckIntervalSeconds": 2,
+    "idleHeartbeatSeconds": 60,
+    "wnfEnabled": true,
     "loggingEnabled": true
 }

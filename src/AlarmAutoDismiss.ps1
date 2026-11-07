@@ -51,6 +51,8 @@ $notifyOnDismiss = $true
 $checkIntervalSeconds = 10
 $batteryCheckIntervalSeconds = 25
 $activeCheckIntervalSeconds = 2
+$idleHeartbeatSeconds = 60
+$wnfEnabled = $true
 if (Test-Path $configPath) {
     try {
         $cfg = Get-Content $configPath -Raw | ConvertFrom-Json
@@ -61,6 +63,8 @@ if (Test-Path $configPath) {
         $checkIntervalSeconds = Get-ValidConfigInt $cfg.checkIntervalSeconds 1 60 $checkIntervalSeconds
         $batteryCheckIntervalSeconds = Get-ValidConfigInt $cfg.batteryCheckIntervalSeconds 1 60 $batteryCheckIntervalSeconds
         $activeCheckIntervalSeconds = Get-ValidConfigInt $cfg.activeCheckIntervalSeconds 1 10 $activeCheckIntervalSeconds
+        $idleHeartbeatSeconds = Get-ValidConfigInt $cfg.idleHeartbeatSeconds 10 3600 $idleHeartbeatSeconds
+        $wnfEnabled = Get-ValidConfigBool $cfg.wnfEnabled $wnfEnabled
         $loggingEnabled = Get-ValidConfigBool $cfg.loggingEnabled $loggingEnabled
     } catch {
         Write-Log "WARNING: Failed to parse config.json, using defaults: $($_.Exception.Message)"
@@ -212,9 +216,15 @@ if ($Action -match "^[-/]?status$") {
     } catch {}
     $currInterval = if ($onBattery) { $batteryCheckIntervalSeconds } else { $checkIntervalSeconds }
 
-    Write-Host "  Power Source:    $(if ($onBattery) { "Battery / DC (${batteryCheckIntervalSeconds}s adaptive polling)" } else { "AC Power / Plugged In (${checkIntervalSeconds}s polling)" })" -ForegroundColor White
+    $wnfStatusStr = if ($wnfEnabled) { "ACTIVE (Sub-10ms Event-Driven + ${idleHeartbeatSeconds}s Heartbeat)" } else { "DISABLED (Dual-Speed Polling Fallback)" }
+    Write-Host "  Power Source:    $(if ($onBattery) { "Battery / DC" } else { "AC Power / Plugged In" })" -ForegroundColor White
+    Write-Host "  Kernel Trigger:  $wnfStatusStr" -ForegroundColor White
     Write-Host "  Thresholds:      Alarms: ${timeoutSeconds}s | Timers: ${timerTimeoutSeconds}s" -ForegroundColor DarkGray
-    Write-Host "  Intervals:       AC: ${checkIntervalSeconds}s | Battery: ${batteryCheckIntervalSeconds}s | Active Ringing: ${activeCheckIntervalSeconds}s (Effective: ${currInterval}s)" -ForegroundColor DarkGray
+    if ($wnfEnabled) {
+        Write-Host "  Intervals:       Event-Driven: <10ms | Fallback Heartbeat: ${idleHeartbeatSeconds}s | Active Ringing: ${activeCheckIntervalSeconds}s" -ForegroundColor DarkGray
+    } else {
+        Write-Host "  Intervals:       AC: ${checkIntervalSeconds}s | Battery: ${batteryCheckIntervalSeconds}s | Active Ringing: ${activeCheckIntervalSeconds}s (Effective: ${currInterval}s)" -ForegroundColor DarkGray
+    }
     Write-Host "  Smart Idle:      $(if ($smartIdleGating) { 'Enabled' } else { 'Disabled' }) | Silent Reminder: $(if ($notifyOnDismiss) { 'Enabled' } else { 'Disabled' })" -ForegroundColor DarkGray
     Write-Host "--------------------------------------------------" -ForegroundColor DarkGray
     Write-Host "  Recent Activity (alarm_history.log):" -ForegroundColor Gray
@@ -431,13 +441,50 @@ try {
         } catch {}
     }
 
-# Define EcoQoS and memory compaction helper via pure in-memory Reflection.Emit (zero-disk, zero-csc.exe)
+# Define EcoQoS, memory compaction, and WNF event bridge via pure in-memory Reflection.Emit (zero-disk, zero-csc.exe)
 if (-not ([System.Management.Automation.PSTypeName]'NativeEco').Type) {
     try {
-        $a = [AppDomain]::CurrentDomain.DefineDynamicAssembly((New-Object Reflection.AssemblyName 'NativeEcoAsm'), 1).DefineDynamicModule('M').DefineType('NativeEco', 1025)
+        $dynAsm = [AppDomain]::CurrentDomain.DefineDynamicAssembly((New-Object Reflection.AssemblyName 'NativeEcoAsm'), 1)
+        $dynMod = $dynAsm.DefineDynamicModule('M')
+        $a = $dynMod.DefineType('NativeEco', 1025)
         $a.DefinePInvokeMethod('SetProcessWorkingSetSize', 'kernel32.dll', 22, 1, [bool], @([IntPtr], [IntPtr], [IntPtr]), 1, 3).SetImplementationFlags(128)
         $a.DefinePInvokeMethod('SetProcessInformation', 'kernel32.dll', 22, 1, [bool], @([IntPtr], [int], [byte[]], [uint32]), 1, 3).SetImplementationFlags(128)
         $a.DefinePInvokeMethod('GetLastInputInfo', 'user32.dll', 22, 1, [bool], @([byte[]]), 1, 3).SetImplementationFlags(128)
+
+        # kernel32.dll!SetEvent
+        $setEventMb = $a.DefinePInvokeMethod('SetEvent', 'kernel32.dll', 22, 1, [bool], @([IntPtr]), 1, 3)
+        $setEventMb.SetImplementationFlags(128)
+
+        # Pure CIL WnfCallback: loads arg3 (callbackContext / hWakeEvent), calls SetEvent, returns 0
+        $callbackMb = $a.DefineMethod('WnfCallback', 22, [int], @([UInt64], [uint32], [IntPtr], [IntPtr], [IntPtr], [uint32]))
+        $il = $callbackMb.GetILGenerator()
+        $il.Emit([System.Reflection.Emit.OpCodes]::Ldarg_3)
+        $il.EmitCall([System.Reflection.Emit.OpCodes]::Call, $setEventMb, $null)
+        $il.Emit([System.Reflection.Emit.OpCodes]::Pop)
+        $il.Emit([System.Reflection.Emit.OpCodes]::Ldc_I4_0)
+        $il.Emit([System.Reflection.Emit.OpCodes]::Ret)
+
+        # Define delegate type WnfCallbackDelegate
+        $delBuilder = $dynMod.DefineType('WnfCallbackDelegate', 1025 -bor [System.Reflection.TypeAttributes]::Sealed, [System.MulticastDelegate])
+        $delCtor = $delBuilder.DefineConstructor(
+            [System.Reflection.MethodAttributes]::RTSpecialName -bor [System.Reflection.MethodAttributes]::HideBySig -bor [System.Reflection.MethodAttributes]::Public, 
+            [System.Reflection.CallingConventions]::Standard, 
+            @([object], [IntPtr]))
+        $delCtor.SetImplementationFlags([System.Reflection.MethodImplAttributes]::Runtime -bor [System.Reflection.MethodImplAttributes]::Managed)
+        $delInvoke = $delBuilder.DefineMethod('Invoke', 
+            [System.Reflection.MethodAttributes]::Public -bor [System.Reflection.MethodAttributes]::HideBySig -bor [System.Reflection.MethodAttributes]::NewSlot -bor [System.Reflection.MethodAttributes]::Virtual, 
+            [int], 
+            @([UInt64], [uint32], [IntPtr], [IntPtr], [IntPtr], [uint32]))
+        $delInvoke.SetImplementationFlags([System.Reflection.MethodImplAttributes]::Runtime -bor [System.Reflection.MethodImplAttributes]::Managed)
+        [void]$delBuilder.CreateType()
+
+        # ntdll.dll WNF P/Invokes
+        $subMb = $a.DefinePInvokeMethod('RtlSubscribeWnfStateChangeNotification', 'ntdll.dll', 22, 1, [int], @([IntPtr].MakeByRefType(), [UInt64], [uint32], [IntPtr], [IntPtr], [IntPtr], [uint32], [uint32]), 1, 3)
+        $subMb.SetImplementationFlags(128)
+
+        $unsubMb = $a.DefinePInvokeMethod('RtlUnsubscribeWnfNotificationWaitForCompletion', 'ntdll.dll', 22, 1, [int], @([IntPtr]), 1, 3)
+        $unsubMb.SetImplementationFlags(128)
+
         [void]$a.CreateType()
     } catch {}
 }
@@ -485,7 +532,7 @@ try {
 
 Remove-Item $stopSignalPath -Force -ErrorAction SilentlyContinue
 
-Write-Log "=== PowerShell Daemon started (PID: $PID, AlarmTimeout: ${timeoutSeconds}s, TimerTimeout: ${timerTimeoutSeconds}s, SmartIdle: $smartIdleGating, Interval: ${checkIntervalSeconds}s, BatteryInterval: ${batteryCheckIntervalSeconds}s, ActiveInterval: ${activeCheckIntervalSeconds}s, EcoQoS: $ecoSuccess) ==="
+Write-Log "=== PowerShell Daemon started (PID: $PID, AlarmTimeout: ${timeoutSeconds}s, TimerTimeout: ${timerTimeoutSeconds}s, SmartIdle: $smartIdleGating, Interval: ${checkIntervalSeconds}s, BatteryInterval: ${batteryCheckIntervalSeconds}s, ActiveInterval: ${activeCheckIntervalSeconds}s, Heartbeat: ${idleHeartbeatSeconds}s, WNF: $wnfEnabled, EcoQoS: $ecoSuccess) ==="
 
 # Initialize WinRT UserNotificationListener & Forms
 try {
@@ -552,6 +599,35 @@ try {
     Write-Log "WARNING: Could not register SystemEvents watchdog: $($_.Exception.Message)"
 }
 
+# Initialize WNF event subscription for sub-10ms event-driven notifications
+$wnfSubscription = [IntPtr]::Zero
+$wnfSubscribed = $false
+$wnfDelRoot = $null
+
+if ($wnfEnabled -and ([System.Management.Automation.PSTypeName]'NativeEco').Type) {
+    try {
+        $delType = ([System.Management.Automation.PSTypeName]'WnfCallbackDelegate').Type
+        if ($delType -and $wakeEvent) {
+            $methodInfo = [NativeEco].GetMethod('WnfCallback')
+            $wnfDelRoot = [System.Delegate]::CreateDelegate($delType, $methodInfo)
+            $pCallback = [System.Runtime.InteropServices.Marshal]::GetFunctionPointerForDelegate($wnfDelRoot)
+            $hWake = $wakeEvent.SafeWaitHandle.DangerousGetHandle()
+            
+            [UInt64]$wnfState = 0xD83063EA3BC1035 # WNF_SHEL_NOTIFICATIONS
+            $subStatus = [NativeEco]::RtlSubscribeWnfStateChangeNotification([ref]$wnfSubscription, $wnfState, 0, $pCallback, $hWake, [IntPtr]::Zero, 0, 1)
+            if ($subStatus -eq 0 -and $wnfSubscription -ne [IntPtr]::Zero) {
+                $wnfSubscribed = $true
+                Write-Log "WNF: Subscribed to WNF_SHEL_NOTIFICATIONS. Sub-10ms event-driven triggers active."
+                [void]$wakeEvent.WaitOne(200)
+            } else {
+                Write-Log "WARNING: RtlSubscribeWnfStateChangeNotification returned 0x$($subStatus.ToString('X8')). Using dual-speed polling fallback."
+            }
+        }
+    } catch {
+        Write-Log "WARNING: Failed to initialize WNF subscription: $($_.Exception.Message). Using dual-speed polling fallback."
+    }
+}
+
 $firstSeenMap = @{}
 $lastIdleLog = @{}
 $lastMemoryTrim = [DateTime]::UtcNow
@@ -610,6 +686,14 @@ while ($true) {
                 $checkIntervalSeconds = Get-ValidConfigInt $cfg.checkIntervalSeconds 1 60 $checkIntervalSeconds
                 $batteryCheckIntervalSeconds = Get-ValidConfigInt $cfg.batteryCheckIntervalSeconds 1 60 $batteryCheckIntervalSeconds
                 $activeCheckIntervalSeconds = Get-ValidConfigInt $cfg.activeCheckIntervalSeconds 1 10 $activeCheckIntervalSeconds
+                $idleHeartbeatSeconds = Get-ValidConfigInt $cfg.idleHeartbeatSeconds 10 3600 $idleHeartbeatSeconds
+                if ($null -ne $cfg.wnfEnabled) {
+                    $newWnf = Get-ValidConfigBool $cfg.wnfEnabled $wnfEnabled
+                    if ($newWnf -ne $wnfEnabled) {
+                        $wnfEnabled = $newWnf
+                        Write-Log "Settings reloaded from config.json: WNF Enabled set to ${wnfEnabled}."
+                    }
+                }
                 # Concurrency hardening: only advance timestamp marker after successful parse
                 $lastConfigModified = $currModified
             }
@@ -676,12 +760,34 @@ while ($true) {
                                         if (($isClockAlarm -or ($aumid -and $aumid -like "*PowerShell*")) -and $t.Text.Contains($testTag)) { $isTestToast = $true }
                                     }
                                 }
-                                # Windows Clock countdown timers present the localized timer title as element 0
-                                # (e.g. "Timer", "Timer 1", "Timer (2)", "Minuteur") rather than multi-word user alarm labels
+                                # Dual-stage timer vs alarm discrimination (multi-locale + structural heuristics)
+                                $isTimerHeader = $false
                                 if ($txts.Count -gt 0 -and $txts[0].Text) {
-                                    if ($txts[0].Text -match "^(?i)(timer|minuteur|temporizador|temporizzatore|таймер|タイマー|计时器|計時器|타이머|टाइमर)(\s*(\d+|\(\d+\)))?$") {
-                                        $isTimer = $true
+                                    $timerPattern = '^(?i)(timer|minuteur|temporizador|temporizzatore|kurzzeitwecker|minutnik|zamanlay\u0131c\u0131|kookwekker|\u0442\u0430\u0439\u043C\u0435\u0440|\u30BF\u30A4\u30DE\u30FC|\u8BA1\u65F6\u5668|\u8A08\u6642\u5668|\uD0C0\uC774\uBA38|\u091F\u093E\u0907\u092E\u0930|\u0627\u0644\u0645\u0624\u0642\u062A)(\s*(\d+|\(\d+\)))?$'
+                                    if ($txts[0].Text -match $timerPattern) {
+                                        $isTimerHeader = $true
                                     }
+                                }
+
+                                $isDurationText = $false
+                                $isWallClockText = $false
+                                if ($txts.Count -gt 1 -and $txts[1].Text) {
+                                    $secText = $txts[1].Text.Trim()
+                                    if ($secText -match '^(\d{1,2}:)?\d{1,2}:\d{2}$' -or $secText -match '(?i)\b(time''s up|temps \u00E9coul\u00E9|zeit abgelaufen|tiempo cumplido|tempo scaduto)\b') {
+                                        $isDurationText = $true
+                                    }
+                                    $nowDt = Get-Date
+                                    $h12 = $nowDt.ToString("h:mm")
+                                    $h24 = $nowDt.ToString("HH:mm")
+                                    if ($secText.Contains($h12) -or $secText.Contains($h24) -or $secText -match '(?i)\b(am|pm)\b' -or $secText -match '(?i)\b(every day|daily|weekdays|weekends|tous les jours|t\u00E4glich|tutti i giorni|todos los d\u00EDas)\b') {
+                                        $isWallClockText = $true
+                                    }
+                                }
+
+                                if ($isWallClockText) {
+                                    $isTimer = $false
+                                } elseif ($isTimerHeader -or $isDurationText) {
+                                    $isTimer = $true
                                 }
                             }
                         }
@@ -819,13 +925,15 @@ while ($true) {
             }
         }
 
-        # Dual-Speed adaptive sleep: 2s active alarm tracking vs 10s/25s deep idle
+        # Dual-Speed & Event-Driven adaptive sleep
         $onBattery = $false
         try {
             $onBattery = ([System.Windows.Forms.SystemInformation]::PowerStatus.PowerLineStatus -eq [System.Windows.Forms.PowerLineStatus]::Offline)
         } catch {}
         $currIntervalSec = if ($firstSeenMap.Count -gt 0) {
             $activeCheckIntervalSeconds
+        } elseif ($wnfSubscribed) {
+            $idleHeartbeatSeconds
         } elseif ($onBattery) {
             $batteryCheckIntervalSeconds
         } else {
@@ -859,6 +967,13 @@ while ($true) {
         }
     } catch {}
     Remove-Item $stopSignalPath -Force -ErrorAction SilentlyContinue
+    if ($wnfSubscription -ne [IntPtr]::Zero) {
+        try {
+            [void][NativeEco]::RtlUnsubscribeWnfNotificationWaitForCompletion($wnfSubscription)
+            Write-Log "WNF: Cleanly unsubscribed from WNF_SHEL_NOTIFICATIONS."
+        } catch {}
+        $wnfSubscription = [IntPtr]::Zero
+    }
     if ($wakeEvent) {
         try { $wakeEvent.Close() } catch {}
     }

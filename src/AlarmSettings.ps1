@@ -89,13 +89,15 @@ function Signal-DaemonWake {
 }
 
 function Save-ConfigSettings([int]$timeout, [int]$timerTimeout, [bool]$smartIdle, [bool]$notify) {
-    $cInt = 10; $bInt = 25; $aInt = 2; $logEn = $true
+    $cInt = 10; $bInt = 25; $aInt = 2; $hbInt = 60; $wnfEn = $true; $logEn = $true
     if (Test-Path $configPath) {
         try {
             $ex = Get-Content $configPath -Raw | ConvertFrom-Json
             $cInt = Get-ValidConfigInt $ex.checkIntervalSeconds 1 60 10
             $bInt = Get-ValidConfigInt $ex.batteryCheckIntervalSeconds 1 60 25
             $aInt = Get-ValidConfigInt $ex.activeCheckIntervalSeconds 1 10 2
+            $hbInt = Get-ValidConfigInt $ex.idleHeartbeatSeconds 10 3600 60
+            $wnfEn = Get-ValidConfigBool $ex.wnfEnabled $true
             $logEn = Get-ValidConfigBool $ex.loggingEnabled $true
         } catch {}
     }
@@ -107,6 +109,8 @@ function Save-ConfigSettings([int]$timeout, [int]$timerTimeout, [bool]$smartIdle
         checkIntervalSeconds = $cInt
         batteryCheckIntervalSeconds = $bInt
         activeCheckIntervalSeconds = $aInt
+        idleHeartbeatSeconds = $hbInt
+        wnfEnabled = $wnfEn
         loggingEnabled = $logEn
     } | ConvertTo-Json
     $tmp = "$configPath.tmp"
@@ -163,7 +167,7 @@ function Save-ConfigSettings([int]$timeout, [int]$timerTimeout, [bool]$smartIdle
 <TextBlock Text="Clock Auto-Dismiss Settings" FontSize="12" Foreground="#9E9E9E" Margin="0,2,0,0"/>
 </StackPanel>
 <Border Grid.Column="1" Background="#242830" BorderBrush="#303848" BorderThickness="1" CornerRadius="12" Padding="10,3" VerticalAlignment="Center">
-<TextBlock Text="v1.6.12 | Ultra-Low Power" FontSize="11" Foreground="#4DA3FF" FontWeight="SemiBold"/>
+<TextBlock Text="v1.7.0 | Event-Driven WNF" FontSize="11" Foreground="#4DA3FF" FontWeight="SemiBold"/>
 </Border>
 </Grid>
 <Border Style="{StaticResource Card}">

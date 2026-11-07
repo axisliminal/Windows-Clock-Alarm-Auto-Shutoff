@@ -59,6 +59,8 @@ Settings can be changed via the Control Panel or edited directly in `config.json
   "checkIntervalSeconds": 10,
   "batteryCheckIntervalSeconds": 25,
   "activeCheckIntervalSeconds": 2,
+  "idleHeartbeatSeconds": 60,
+  "wnfEnabled": true,
   "loggingEnabled": true
 }
 ```
@@ -70,6 +72,8 @@ Settings can be changed via the Control Panel or edited directly in `config.json
 - `checkIntervalSeconds`: Quiet idle polling frequency on AC power in seconds (default: `10`).
 - `batteryCheckIntervalSeconds`: Quiet idle polling frequency on DC battery in seconds (default: `25`).
 - `activeCheckIntervalSeconds`: High-precision polling frequency while an alarm/timer is actively ringing (default: `2`).
+- `idleHeartbeatSeconds`: Defensive fallback polling frequency in quiet idle (default: `60`).
+- `wnfEnabled`: Enables sub-10ms event-driven triggers via Windows Notification Facility (default: `true`).
 - `loggingEnabled`: Enables event logging to `alarm_history.log` (default: `true`).
 
 *(Note: Auto-start on Windows login is managed via the Control Panel toggle or `Setup.bat`, storing its state directly in `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`).*
